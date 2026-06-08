@@ -16,7 +16,7 @@ concurrency:
 jobs:
   build-ipa:
     name: Build IPA
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 360
 
     steps:
@@ -25,8 +25,12 @@ jobs:
 
       - name: Show tool versions
         run: |
+          xcode-select -p
           xcodebuild -version
+          xcrun --sdk macosx --show-sdk-path
+          xcrun --sdk macosx --show-sdk-version
           xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphoneos --show-sdk-version
           python3 --version
           rustup --version
           cargo --version
