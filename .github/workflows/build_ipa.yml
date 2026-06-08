@@ -38,7 +38,8 @@ jobs:
       - name: Install dependencies
         run: |
           brew update
-          brew install ldid
+          brew install llvm ldid
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
           rustup target add aarch64-apple-ios
 
       - name: Update Gecko source
