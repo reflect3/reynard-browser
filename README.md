@@ -194,10 +194,10 @@ Reynard also works great on the latest version of iOS!
 > [!WARNING]
 > Build instructions are included below for reference. Please be aware that I **do not** provide support for issues or errors encountered during the build process.
 
-To build the project, you'll need Xcode, [Python 3](https://www.python.org/downloads/), [Rust and Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html), Homebrew [LLVM](https://formulae.brew.sh/formula/llvm) for the `lld` linker used by Gecko when available, and [ldid](https://formulae.brew.sh/formula/ldid).
+To build the project, you'll need Xcode, [Python 3](https://www.python.org/downloads/), [Rust and Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html), Homebrew [LLVM](https://formulae.brew.sh/formula/llvm) for the `lld` linker used by Gecko when available, [cbindgen](https://formulae.brew.sh/formula/cbindgen) for Gecko generated bindings, and [ldid](https://formulae.brew.sh/formula/ldid).
 
 ```bash
-brew install llvm ldid
+brew install llvm ldid cbindgen
 ```
 
 Clone the repository.

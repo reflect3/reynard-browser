@@ -84,21 +84,15 @@ final class TabSessionStore {
             
             switch intent {
             case .back:
-                recordBackNavigationLocked(to: url, state: &state)
+                recordConfirmedBackNavigationLocked(to: url, state: &state)
             case .forward:
-                recordForwardNavigationLocked(to: url, state: &state)
+                recordConfirmedForwardNavigationLocked(to: url, state: &state)
             case .replace:
                 state.currentURL = url
             case .normal:
                 recordNewNavigationLocked(to: url, state: &state)
             case nil:
-                if state.backList.last == url {
-                    recordBackNavigationLocked(to: url, state: &state)
-                } else if state.forwardList.first == url {
-                    recordForwardNavigationLocked(to: url, state: &state)
-                } else {
-                    recordNewNavigationLocked(to: url, state: &state)
-                }
+                recordInferredNavigationLocked(to: url, state: &state)
             }
             
             savePersistedStateLocked(state, for: tabID)
@@ -175,6 +169,47 @@ final class TabSessionStore {
         
         state.currentURL = url
         state.forwardList.removeAll(keepingCapacity: false)
+    }
+    
+    private func recordInferredNavigationLocked(to url: String, state: inout PersistedState) {
+        if state.backList.last == url {
+            recordBackNavigationLocked(to: url, state: &state)
+        } else if state.forwardList.first == url {
+            recordForwardNavigationLocked(to: url, state: &state)
+        } else {
+            recordNewNavigationLocked(to: url, state: &state)
+        }
+    }
+    
+    private func recordConfirmedBackNavigationLocked(to url: String, state: inout PersistedState) {
+        guard state.backList.last == url else {
+            recordUnexpectedHistoryNavigationLocked(to: url, state: &state)
+            return
+        }
+        
+        recordBackNavigationLocked(to: url, state: &state)
+    }
+    
+    private func recordConfirmedForwardNavigationLocked(to url: String, state: inout PersistedState) {
+        guard state.forwardList.first == url else {
+            recordUnexpectedHistoryNavigationLocked(to: url, state: &state)
+            return
+        }
+        
+        recordForwardNavigationLocked(to: url, state: &state)
+    }
+    
+    private func recordUnexpectedHistoryNavigationLocked(to url: String, state: inout PersistedState) {
+        state.backList.removeAll { $0 == url }
+        state.forwardList.removeAll { $0 == url }
+        
+        if let currentURL = state.currentURL,
+           !currentURL.isEmpty,
+           currentURL != url {
+            state.forwardList.insert(currentURL, at: 0)
+        }
+        
+        state.currentURL = url
     }
     
     private func recordBackNavigationLocked(to url: String, state: inout PersistedState) {
