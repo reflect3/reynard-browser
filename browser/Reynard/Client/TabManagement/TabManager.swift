@@ -32,6 +32,7 @@ protocol TabManager: AnyObject {
     func removeAllTabs(mode: TabMode?)
     func browse(to term: String)
     func browse(to term: String, in tab: Tab)
+    func markNextNavigationAsReplace(for tab: Tab)
     func goBack()
     func goForward()
     func replaceSession(with session: GeckoSession, url: String, title: String?)

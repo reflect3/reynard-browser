@@ -10,6 +10,13 @@ import Foundation
 final class TabSessionStore {
     static let shared = TabSessionStore()
     
+    enum ObservedNavigationIntent {
+        case back
+        case forward
+        case replace
+        case normal
+    }
+    
     struct Snapshot {
         let currentURL: String?
         let backList: [String]
@@ -65,19 +72,35 @@ final class TabSessionStore {
     }
     
     func recordNavigation(to url: String, for tabID: UUID) -> Snapshot {
+        recordObservedNavigation(to: url, for: tabID, intent: .normal)
+    }
+    
+    func recordObservedNavigation(to url: String, for tabID: UUID, intent: ObservedNavigationIntent?) -> Snapshot {
         stateQueue.sync {
             var state = loadPersistedStateLocked(for: tabID)
             guard state.currentURL != url else {
                 return snapshot(from: state)
             }
             
-            if let currentURL = state.currentURL,
-               !currentURL.isEmpty {
-                state.backList.append(currentURL)
+            switch intent {
+            case .back:
+                recordBackNavigationLocked(to: url, state: &state)
+            case .forward:
+                recordForwardNavigationLocked(to: url, state: &state)
+            case .replace:
+                state.currentURL = url
+            case .normal:
+                recordNewNavigationLocked(to: url, state: &state)
+            case nil:
+                if state.backList.last == url {
+                    recordBackNavigationLocked(to: url, state: &state)
+                } else if state.forwardList.first == url {
+                    recordForwardNavigationLocked(to: url, state: &state)
+                } else {
+                    recordNewNavigationLocked(to: url, state: &state)
+                }
             }
             
-            state.currentURL = url
-            state.forwardList.removeAll(keepingCapacity: false)
             savePersistedStateLocked(state, for: tabID)
             return snapshot(from: state)
         }
@@ -142,6 +165,44 @@ final class TabSessionStore {
     
     private func prepareStorageLocked() {
         try? fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+    }
+    
+    private func recordNewNavigationLocked(to url: String, state: inout PersistedState) {
+        if let currentURL = state.currentURL,
+           !currentURL.isEmpty {
+            state.backList.append(currentURL)
+        }
+        
+        state.currentURL = url
+        state.forwardList.removeAll(keepingCapacity: false)
+    }
+    
+    private func recordBackNavigationLocked(to url: String, state: inout PersistedState) {
+        if !state.backList.isEmpty {
+            _ = state.backList.popLast()
+        }
+        
+        if let currentURL = state.currentURL,
+           !currentURL.isEmpty,
+           currentURL != url {
+            state.forwardList.insert(currentURL, at: 0)
+        }
+        
+        state.currentURL = url
+    }
+    
+    private func recordForwardNavigationLocked(to url: String, state: inout PersistedState) {
+        if !state.forwardList.isEmpty {
+            _ = state.forwardList.removeFirst()
+        }
+        
+        if let currentURL = state.currentURL,
+           !currentURL.isEmpty,
+           currentURL != url {
+            state.backList.append(currentURL)
+        }
+        
+        state.currentURL = url
     }
     
     private func loadPersistedStateLocked(for tabID: UUID) -> PersistedState {
