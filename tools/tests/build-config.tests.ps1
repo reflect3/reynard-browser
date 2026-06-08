@@ -1,0 +1,49 @@
+$ErrorActionPreference = "Stop"
+
+$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
+
+$BuildGeckoPath = Join-Path $RepoRoot "tools/development/build-gecko.sh"
+$WorkflowPath = Join-Path $RepoRoot ".github/workflows/build_ipa.yml"
+$ReadmePath = Join-Path $RepoRoot "README.md"
+
+$BuildGecko = Get-Content -Raw -LiteralPath $BuildGeckoPath
+$Workflow = Get-Content -Raw -LiteralPath $WorkflowPath
+$Readme = Get-Content -Raw -LiteralPath $ReadmePath
+
+function Assert-Matches {
+	param(
+		[string] $Text,
+		[string] $Pattern,
+		[string] $Message
+	)
+
+	if ($Text -notmatch $Pattern) {
+		throw $Message
+	}
+}
+
+function Assert-DoesNotMatch {
+	param(
+		[string] $Text,
+		[string] $Pattern,
+		[string] $Message
+	)
+
+	if ($Text -match $Pattern) {
+		throw $Message
+	}
+}
+
+Assert-Matches $BuildGecko '(?m)^detect_lld_linker\(\) \{' "build-gecko.sh must detect lld before enabling it."
+Assert-Matches $BuildGecko 'command -v ld64\.lld' "build-gecko.sh must check for Darwin ld64.lld."
+Assert-Matches $BuildGecko 'command -v lld' "build-gecko.sh must check for lld."
+Assert-Matches $BuildGecko '-fuse-ld=lld' "build-gecko.sh must preflight clang with -fuse-ld=lld."
+Assert-Matches $BuildGecko 'GECKO_LINKER_OPTION' "build-gecko.sh must write linker mozconfig through a detected option."
+Assert-DoesNotMatch $BuildGecko '(?m)^\s*echo "ac_add_options --enable-linker=lld"\s*$' "build-gecko.sh must not unconditionally write --enable-linker=lld."
+
+Assert-DoesNotMatch $Workflow 'GITHUB_PATH' "build_ipa.yml must not add Homebrew LLVM to the global GitHub Actions PATH."
+
+Assert-Matches $Readme '(?i)LLVM' "README.md must document the LLVM dependency for Gecko builds."
+Assert-Matches $Readme '(?i)lld' "README.md must document the lld linker dependency for Gecko builds."
+
+Write-Host "build configuration tests passed"
