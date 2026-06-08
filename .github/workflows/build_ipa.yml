@@ -1,0 +1,71 @@
+name: Build IPA
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-ipa-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-ipa:
+    name: Build IPA
+    runs-on: macos-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Show tool versions
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          python3 --version
+          rustup --version
+          cargo --version
+
+      - name: Install dependencies
+        run: |
+          brew update
+          brew install ldid
+          rustup target add aarch64-apple-ios
+
+      - name: Update Gecko source
+        run: zsh tools/development/update-gecko.sh
+
+      - name: Apply Gecko patches
+        run: zsh tools/development/apply-patches.sh
+
+      - name: Build idevice FFI
+        run: zsh tools/development/build-idevice.sh
+
+      - name: Build Gecko
+        run: sh tools/development/build-gecko.sh
+
+      - name: Archive Reynard
+        env:
+          REYNARD_AD_HOC_SIGNING: "1"
+        run: sh tools/release/build-app.sh
+
+      - name: Create IPA artifacts
+        run: sh tools/release/create-ipa.sh
+
+      - name: Upload IPA artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: reynard-ipa-${{ github.run_number }}
+          path: |
+            dist/*.ipa
+            dist/*.tipa
+          if-no-files-found: error
+          retention-days: 14

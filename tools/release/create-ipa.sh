@@ -52,5 +52,6 @@ chmod 0755 "$PTRACE_JIT_OUT"
 ldid -S"$ROOT_DIR/browser/Reynard/TrollStore/JIT/ptrace_jit.entitlements" "$PTRACE_JIT_OUT"
 ldid -S"$ROOT_DIR/browser/Reynard/Entitlements/Reynard.private.entitlements" "Payload/Reynard.app/Reynard"
 ldid -S"$ROOT_DIR/browser/Helper/Entitlements/Reynard-Helper.private.entitlements" "Payload/Reynard.app/PlugIns/Reynard Helper.appex/Reynard Helper"
+ldid -S "Payload/Reynard.app/PlugIns/OpenIn.appex/OpenIn"
 zip -r ../Reynard-TrollStore.tipa Payload -x "._*" -x ".DS_Store" -x "__MACOSX" # trollstore ipa
 cp ../Reynard-TrollStore.tipa ../Reynard-Jailbroken.ipa # for jailbroken users
