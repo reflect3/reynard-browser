@@ -67,6 +67,7 @@ rm -f "$FIREFOX_DIR/.mozconfig"
 	echo "ac_add_options --enable-ios-target=$IOS_TARGET"
 	echo "ac_add_options --enable-webrtc"
 	echo "ac_add_options --enable-optimize"
+	echo "ac_add_options --without-wasm-sandboxed-libraries"
 	if [ -n "$GECKO_LINKER_OPTION" ]; then
 		echo "ac_add_options $GECKO_LINKER_OPTION"
 	fi

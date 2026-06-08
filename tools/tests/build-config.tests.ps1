@@ -46,6 +46,7 @@ Assert-Matches $BuildGecko 'command -v ld64\.lld' "build-gecko.sh must check for
 Assert-Matches $BuildGecko 'command -v lld' "build-gecko.sh must check for lld."
 Assert-Matches $BuildGecko '-fuse-ld=lld' "build-gecko.sh must preflight clang with -fuse-ld=lld."
 Assert-Matches $BuildGecko 'GECKO_LINKER_OPTION' "build-gecko.sh must write linker mozconfig through a detected option."
+Assert-Matches $BuildGecko '--without-wasm-sandboxed-libraries' "build-gecko.sh must disable wasm sandboxed libraries to avoid requiring a WASI sysroot."
 Assert-DoesNotMatch $BuildGecko '(?m)^\s*echo "ac_add_options --enable-linker=lld"\s*$' "build-gecko.sh must not unconditionally write --enable-linker=lld."
 
 Assert-Matches $GeckoToolchainPatch 'diff --git a/build/moz\.configure/toolchain\.configure b/build/moz\.configure/toolchain\.configure' "Gecko linker workaround patch must target toolchain.configure."

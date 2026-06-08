@@ -56,6 +56,7 @@ final class TabManagerImplementation: NSObject, TabManager {
     private var faviconTasks: [UUID: Task<Void, Never>] = [:]
     private var pendingHistoryNavigations: [UUID: PendingHistoryNavigation] = [:]
     private var pendingObservedNavigationIntents: [UUID: TabSessionStore.ObservedNavigationIntent] = [:]
+    private var replaceNavigationTabIDs: Set<UUID> = []
     private var selectionCounter = 0
     
     private lazy var isURLLenient: NSRegularExpression = {
@@ -164,6 +165,7 @@ final class TabManagerImplementation: NSObject, TabManager {
     }
     
     private func loadHistoryURL(_ url: String, in tab: Tab) {
+        replaceNavigationTabIDs.insert(tab.id)
         pendingObservedNavigationIntents[tab.id] = .replace
         tab.session.updateSettings(GeckoSessionController.shared.sessionSettings(for: url, tabID: tab.id))
         tab.session.load(url, flags: GeckoSessionLoadFlags.replaceHistory)
@@ -218,6 +220,19 @@ final class TabManagerImplementation: NSObject, TabManager {
         return trimmedValue
     }
     
+    private func shouldWaitForMeaningfulHistoryChange(_ pending: PendingHistoryNavigation, observedURL: String) -> Bool {
+        let observedURL = normalizedNavigationURL(observedURL)
+        let startedURL = normalizedNavigationURL(pending.startedURL)
+        guard observedURL == startedURL else {
+            return false
+        }
+
+        guard let expectedURL = normalizedNavigationURL(pending.expectedURL) else {
+            return true
+        }
+        return expectedURL != startedURL
+    }
+
     private func clearPendingHistoryNavigation(for tabID: UUID, token: UUID? = nil) {
         guard let pending = pendingHistoryNavigations[tabID] else {
             return
@@ -235,6 +250,7 @@ final class TabManagerImplementation: NSObject, TabManager {
     private func clearPendingNavigationState(for tabID: UUID) {
         clearPendingHistoryNavigation(for: tabID)
         pendingObservedNavigationIntents.removeValue(forKey: tabID)
+        replaceNavigationTabIDs.remove(tabID)
     }
     
     private func startPendingHistoryNavigation(
@@ -831,6 +847,7 @@ final class TabManagerImplementation: NSObject, TabManager {
     
     func markNextNavigationAsReplace(for tab: Tab) {
         clearPendingNavigationState(for: tab.id)
+        replaceNavigationTabIDs.insert(tab.id)
         pendingObservedNavigationIntents[tab.id] = .replace
     }
     
@@ -1035,6 +1052,9 @@ extension TabManagerImplementation: NavigationDelegate {
         let pendingHistory = pendingHistoryNavigations[tab.id]
         if let pendingHistory,
            pendingHistory.session === session {
+            if shouldWaitForMeaningfulHistoryChange(pendingHistory, observedURL: observedURL) {
+                return
+            }
             observedIntent = observedIntent(for: pendingHistory.direction)
             clearPendingHistoryNavigation(for: tab.id, token: pendingHistory.token)
             pendingObservedNavigationIntents.removeValue(forKey: tab.id)
@@ -1042,7 +1062,12 @@ extension TabManagerImplementation: NavigationDelegate {
             if pendingHistory != nil {
                 clearPendingHistoryNavigation(for: tab.id)
             }
-            observedIntent = pendingObservedNavigationIntents.removeValue(forKey: tab.id)
+            if replaceNavigationTabIDs.contains(tab.id) {
+                observedIntent = .replace
+                pendingObservedNavigationIntents[tab.id] = .replace
+            } else {
+                observedIntent = pendingObservedNavigationIntents.removeValue(forKey: tab.id)
+            }
         }
         tab.suppressInitialNavigation = false
         
@@ -1089,9 +1114,21 @@ extension TabManagerImplementation: NavigationDelegate {
     }
     
     func onLoadRequest(session: GeckoSession, request: LoadRequest) async -> AllowOrDeny {
-        .allow
+        guard let location = tabLocation(for: session),
+              case .current = request.target else {
+            return .allow
+        }
+
+        let tab = tabs(for: location.mode)[location.index]
+        if pendingHistoryNavigations[tab.id] == nil,
+           pendingObservedNavigationIntents[tab.id] == nil,
+           !replaceNavigationTabIDs.contains(tab.id) {
+            pendingObservedNavigationIntents[tab.id] = .normal
+        }
+
+        return .allow
     }
-    
+
     func onSubframeLoadRequest(session: GeckoSession, request: LoadRequest) async -> AllowOrDeny {
         .allow
     }
@@ -1181,6 +1218,10 @@ extension TabManagerImplementation: ProgressDelegate {
             return
         }
         let tab = tabs(for: location.mode)[location.index]
+        if replaceNavigationTabIDs.remove(tab.id) != nil,
+           pendingObservedNavigationIntents[tab.id] == .replace {
+            pendingObservedNavigationIntents.removeValue(forKey: tab.id)
+        }
         
         tab.isLoading = false
         notifyUpdate(at: location.index, mode: location.mode, reason: .loading)

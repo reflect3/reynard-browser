@@ -10,7 +10,7 @@ import Foundation
 final class TabSessionStore {
     static let shared = TabSessionStore()
     
-    enum ObservedNavigationIntent {
+    enum ObservedNavigationIntent: Equatable {
         case back
         case forward
         case replace
@@ -78,7 +78,16 @@ final class TabSessionStore {
     func recordObservedNavigation(to url: String, for tabID: UUID, intent: ObservedNavigationIntent?) -> Snapshot {
         stateQueue.sync {
             var state = loadPersistedStateLocked(for: tabID)
-            guard state.currentURL != url else {
+            if state.currentURL == url {
+                switch intent {
+                case .back:
+                    recordConfirmedBackNavigationLocked(to: url, state: &state)
+                case .forward:
+                    recordConfirmedForwardNavigationLocked(to: url, state: &state)
+                default:
+                    return snapshot(from: state)
+                }
+                savePersistedStateLocked(state, for: tabID)
                 return snapshot(from: state)
             }
             
@@ -183,7 +192,7 @@ final class TabSessionStore {
     
     private func recordConfirmedBackNavigationLocked(to url: String, state: inout PersistedState) {
         guard state.backList.last == url else {
-            recordUnexpectedHistoryNavigationLocked(to: url, state: &state)
+            recordUnexpectedBackNavigationLocked(to: url, state: &state)
             return
         }
         
@@ -192,14 +201,18 @@ final class TabSessionStore {
     
     private func recordConfirmedForwardNavigationLocked(to url: String, state: inout PersistedState) {
         guard state.forwardList.first == url else {
-            recordUnexpectedHistoryNavigationLocked(to: url, state: &state)
+            recordUnexpectedForwardNavigationLocked(to: url, state: &state)
             return
         }
         
         recordForwardNavigationLocked(to: url, state: &state)
     }
     
-    private func recordUnexpectedHistoryNavigationLocked(to url: String, state: inout PersistedState) {
+    private func recordUnexpectedBackNavigationLocked(to url: String, state: inout PersistedState) {
+        if !state.backList.isEmpty {
+            _ = state.backList.popLast()
+        }
+
         state.backList.removeAll { $0 == url }
         state.forwardList.removeAll { $0 == url }
         
@@ -208,10 +221,27 @@ final class TabSessionStore {
            currentURL != url {
             state.forwardList.insert(currentURL, at: 0)
         }
-        
+
         state.currentURL = url
     }
-    
+
+    private func recordUnexpectedForwardNavigationLocked(to url: String, state: inout PersistedState) {
+        if !state.forwardList.isEmpty {
+            _ = state.forwardList.removeFirst()
+        }
+
+        state.backList.removeAll { $0 == url }
+        state.forwardList.removeAll { $0 == url }
+
+        if let currentURL = state.currentURL,
+           !currentURL.isEmpty,
+           currentURL != url {
+            state.backList.append(currentURL)
+        }
+
+        state.currentURL = url
+    }
+
     private func recordBackNavigationLocked(to url: String, state: inout PersistedState) {
         if !state.backList.isEmpty {
             _ = state.backList.popLast()
