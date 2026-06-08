@@ -177,18 +177,9 @@ final class TabOverviewBarButtons {
     
     func setTabCount(_ tabCount: Int) {
         modeControl.setTitle("\(tabCount)" + (tabCount == 1 ? " Tab" : " Tabs"), forSegmentAt: TabOverviewCollection.Mode.regularTabs.rawValue)
-        
-        // Unrelated, too lazy to make a separate func
-        let hasVisibleTab: Bool
-        switch controller.browserUI.tabOverviewCollection.mode {
-        case .privateTabs:
-            hasVisibleTab = !controller.tabManager.privateTabs.isEmpty
-        case .regularTabs:
-            hasVisibleTab = !controller.tabManager.regularTabs.isEmpty
-        }
-        
-        doneButton.isEnabled = hasVisibleTab
-        doneButton.alpha = hasVisibleTab ? 1 : 0.35
-        doneBarButtonItem.isEnabled = hasVisibleTab
+
+        doneButton.isEnabled = true
+        doneButton.alpha = 1
+        doneBarButtonItem.isEnabled = true
     }
 }

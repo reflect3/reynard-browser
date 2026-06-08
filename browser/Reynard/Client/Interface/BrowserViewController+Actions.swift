@@ -158,11 +158,11 @@ extension BrowserViewController {
         if tabOverviewPresentation.isVisible {
             let targetMode: TabMode = browserUI.tabOverviewCollection.mode == .privateTabs ? .private : .regular
             let targetTabs = targetMode == .private ? tabManager.privateTabs : tabManager.regularTabs
-            guard !targetTabs.isEmpty else {
-                return
-            }
-            
-            if tabManager.selectedTabMode != targetMode {
+
+            if targetTabs.isEmpty {
+                pendingExpandedTabBarIndex = nil
+                createTab(selecting: true, at: 0, isPrivate: targetMode == .private)
+            } else if tabManager.selectedTabMode != targetMode {
                 var tabIndex: Int?
                 for index in targetTabs.indices {
                     if tabIndex == nil || targetTabs[index].selectionOrder >= targetTabs[tabIndex!].selectionOrder {
