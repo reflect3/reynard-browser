@@ -783,6 +783,9 @@ final class TabManagerImplementation: NSObject, TabManager {
         guard let tab = selectedTab else {
             return
         }
+        guard pendingHistoryNavigations[tab.id] == nil else {
+            return
+        }
         
         let snapshot = sessionStore.loadSnapshot(for: tab.id)
         if !snapshot.ownsNav && tab.sessionCanGoBack {
@@ -803,6 +806,9 @@ final class TabManagerImplementation: NSObject, TabManager {
     
     func goForward() {
         guard let tab = selectedTab else {
+            return
+        }
+        guard pendingHistoryNavigations[tab.id] == nil else {
             return
         }
         
@@ -1020,37 +1026,31 @@ extension TabManagerImplementation: NavigationDelegate {
             return
         }
         
-        let observedIntent: TabSessionStore.ObservedNavigationIntent?
-        if let observedURL,
-           !observedURL.isEmpty {
-            let pendingHistory = pendingHistoryNavigations[tab.id]
-            if let pendingHistory,
-               pendingHistory.session === session {
-                observedIntent = observedIntent(for: pendingHistory.direction)
-                clearPendingHistoryNavigation(for: tab.id, token: pendingHistory.token)
-                pendingObservedNavigationIntents.removeValue(forKey: tab.id)
-            } else {
-                if pendingHistory != nil {
-                    clearPendingHistoryNavigation(for: tab.id)
-                }
-                observedIntent = pendingObservedNavigationIntents.removeValue(forKey: tab.id)
-            }
-            tab.suppressInitialNavigation = false
-        } else {
-            observedIntent = nil
+        guard let observedURL,
+              !observedURL.isEmpty else {
+            return
         }
         
-        if let observedURL,
-           !observedURL.isEmpty {
-            session.updateSettings(GeckoSessionController.shared.sessionSettings(for: observedURL, tabID: tab.id))
-            SitePermissionController.shared.applyPermissions(to: session, urlString: observedURL)
+        let observedIntent: TabSessionStore.ObservedNavigationIntent?
+        let pendingHistory = pendingHistoryNavigations[tab.id]
+        if let pendingHistory,
+           pendingHistory.session === session {
+            observedIntent = observedIntent(for: pendingHistory.direction)
+            clearPendingHistoryNavigation(for: tab.id, token: pendingHistory.token)
+            pendingObservedNavigationIntents.removeValue(forKey: tab.id)
+        } else {
+            if pendingHistory != nil {
+                clearPendingHistoryNavigation(for: tab.id)
+            }
+            observedIntent = pendingObservedNavigationIntents.removeValue(forKey: tab.id)
         }
+        tab.suppressInitialNavigation = false
+        
+        session.updateSettings(GeckoSessionController.shared.sessionSettings(for: observedURL, tabID: tab.id))
+        SitePermissionController.shared.applyPermissions(to: session, urlString: observedURL)
         
         tab.url = observedURL
-        if let observedURL,
-           !observedURL.isEmpty {
-            recordNavigation(observedURL, for: tab, intent: observedIntent)
-        }
+        recordNavigation(observedURL, for: tab, intent: observedIntent)
         tab.pendingDisplayText = nil
         tab.favicon = nil
         notifyUpdate(at: location.index, mode: location.mode, reason: .location)

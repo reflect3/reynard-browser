@@ -34,11 +34,12 @@ jobs:
           python3 --version
           rustup --version
           cargo --version
+          cbindgen --version || true
 
       - name: Install dependencies
         run: |
           brew update
-          brew install llvm ldid
+          brew install llvm ldid cbindgen
           rustup target add aarch64-apple-ios
 
       - name: Update Gecko source

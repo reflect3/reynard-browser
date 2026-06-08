@@ -54,8 +54,11 @@ Assert-Matches $GeckoToolchainPatch '-Wl,-ld_classic,-v' "Gecko linker workaroun
 Assert-Matches $GeckoToolchainPatch '1844694' "Gecko linker workaround patch must reference Mozilla bug 1844694."
 
 Assert-DoesNotMatch $Workflow 'GITHUB_PATH' "build_ipa.yml must not add Homebrew LLVM to the global GitHub Actions PATH."
+Assert-Matches $Workflow 'brew install llvm ldid cbindgen' "build_ipa.yml must install cbindgen for Gecko builds."
+Assert-Matches $Workflow 'cbindgen --version' "build_ipa.yml must show the cbindgen version for diagnostics."
 
 Assert-Matches $Readme '(?i)LLVM' "README.md must document the LLVM dependency for Gecko builds."
 Assert-Matches $Readme '(?i)lld' "README.md must document the lld linker dependency for Gecko builds."
+Assert-Matches $Readme '(?i)cbindgen' "README.md must document the cbindgen dependency for Gecko builds."
 
 Write-Host "build configuration tests passed"
