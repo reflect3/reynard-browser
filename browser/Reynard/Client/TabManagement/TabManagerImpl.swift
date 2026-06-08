@@ -384,7 +384,7 @@ final class TabManagerImplementation: NSObject, TabManager {
         }
         
         tab.pendingRestoreURL = nil
-        tab.suppressInitialNavigation = false
+        tab.suppressInitialNavigation = true
         loadURL(url, in: tab)
     }
     
