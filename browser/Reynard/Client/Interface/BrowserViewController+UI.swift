@@ -12,6 +12,7 @@ import UIKit
 private enum UIAssociatedKeys {
     static var browserUI = 0
     static var addressBarGestures = 0
+    static var navigationGestures = 0
     static var searchController = 0
     static var searchViewController = 0
     static var isSearchFocused = 0
@@ -82,7 +83,22 @@ extension BrowserViewController: AddressBarDelegate, BottomToolbarDelegate {
             objc_setAssociatedObject(self, &UIAssociatedKeys.addressBarGestures, newValue, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         }
     }
-    
+
+    var navigationGestures: BrowserNavigationGestures {
+        get {
+            if let gestures = objc_getAssociatedObject(self, &UIAssociatedKeys.navigationGestures) as? BrowserNavigationGestures {
+                return gestures
+            }
+
+            let gestures = BrowserNavigationGestures(controller: self)
+            objc_setAssociatedObject(self, &UIAssociatedKeys.navigationGestures, gestures, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+            return gestures
+        }
+        set {
+            objc_setAssociatedObject(self, &UIAssociatedKeys.navigationGestures, newValue, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        }
+    }
+
     var isSearchFocused: Bool {
         get {
             (objc_getAssociatedObject(self, &UIAssociatedKeys.isSearchFocused) as? NSNumber)?.boolValue ?? false
@@ -1603,6 +1619,9 @@ extension BrowserViewController: UICollectionViewDataSource, UICollectionViewDel
     }
     
     func setTabOverviewVisible(_ visible: Bool, animated: Bool) {
+        if visible {
+            navigationGestures.resetInteraction()
+        }
         if visible && usesDetachedSuggestions {
             hideSuggestionsNow()
         }

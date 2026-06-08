@@ -120,6 +120,8 @@ extension BrowserViewController: TabManagerDelegate {
     }
     
     func tabManager(_ tabManager: TabManager, didSelectTabAt index: Int, previousIndex: Int?) {
+        navigationGestures.resetInteraction()
+
         let activeTabs = tabManager.selectedTabMode == .private ? tabManager.privateTabs : tabManager.regularTabs
         pendingExpandedTabBarIndex = nil
         if let previousIndex {

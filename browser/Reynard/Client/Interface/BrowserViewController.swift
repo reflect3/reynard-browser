@@ -100,6 +100,7 @@ final class BrowserViewController: UIViewController {
         browserUI.configureLayout()
         browserUI.observeKeyboard()
         addressBarGestures.configureGestures()
+        navigationGestures.configureGestures()
         restoreTabOverviewMode()
         syncBrowserNavigationChrome(animated: false)
         syncSidebarButtonItem()
@@ -184,7 +185,7 @@ final class BrowserViewController: UIViewController {
         } completion: { _ in
             self.syncBrowserNavigationChrome(animated: false)
             self.syncSidebarButtonItem()
-            self.browserUI.geckoView.transform = .identity
+            self.navigationGestures.resetInteraction()
             self.addressBarGestures.resetHorizontalTransition()
             self.tabOverviewPresentation.refreshForCurrentOrientation()
             DispatchQueue.main.async {
@@ -287,6 +288,8 @@ final class BrowserViewController: UIViewController {
     }
     
     func applyFullscreenState(_ fullScreen: Bool, for session: GeckoSession?) {
+        navigationGestures.resetInteraction()
+
         if fullScreen {
             activeFullscreenSession = session
         } else if activeFullscreenSession === session || session == nil {
