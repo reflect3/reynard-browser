@@ -219,6 +219,10 @@ final class TabManagerImplementation: NSObject, TabManager {
         return trimmedValue
     }
     
+    private func restoredURL(from value: String?, fallback fallbackValue: String?) -> String? {
+        restoredURL(from: value) ?? restoredURL(from: fallbackValue)
+    }
+    
     private func remoteURL(from value: String?) -> URL? {
         guard let trimmedValue = value?.trimmingCharacters(in: .whitespacesAndNewlines),
               let url = URL(string: trimmedValue),
@@ -302,17 +306,19 @@ final class TabManagerImplementation: NSObject, TabManager {
         }
         
         regularTabs = snapshot.regularTabs.map { snapshot in
+            let sessionSnapshot = sessionStore.loadSnapshot(for: snapshot.id)
+            let restoreURL = restoredURL(from: snapshot.url, fallback: sessionSnapshot.currentURL)
+            let displayURL = restoreURL ?? snapshot.url
             let tab = Tab(
                 id: snapshot.id,
                 session: createSession(windowId: nil, isPrivate: false),
                 title: snapshot.title,
-                url: snapshot.url,
-                favicon: cachedFavicon(for: snapshot.url),
+                url: displayURL,
+                favicon: cachedFavicon(for: displayURL),
                 thumbnail: snapshot.thumbnail,
                 isPrivate: false
             )
-            tab.pendingRestoreURL = restoredURL(from: snapshot.url)
-            let sessionSnapshot = sessionStore.loadSnapshot(for: tab.id)
+            tab.pendingRestoreURL = restoreURL
             if sessionSnapshot.canGoBack || sessionSnapshot.canGoForward {
                 _ = sessionStore.setOwnsNav(true, for: tab.id)
             }
@@ -324,17 +330,19 @@ final class TabManagerImplementation: NSObject, TabManager {
         }
         
         privateTabs = snapshot.privateTabs.map { snapshot in
+            let sessionSnapshot = sessionStore.loadSnapshot(for: snapshot.id)
+            let restoreURL = restoredURL(from: snapshot.url, fallback: sessionSnapshot.currentURL)
+            let displayURL = restoreURL ?? snapshot.url
             let tab = Tab(
                 id: snapshot.id,
                 session: createSession(windowId: nil, isPrivate: true),
                 title: snapshot.title,
-                url: snapshot.url,
-                favicon: cachedFavicon(for: snapshot.url),
+                url: displayURL,
+                favicon: cachedFavicon(for: displayURL),
                 thumbnail: snapshot.thumbnail,
                 isPrivate: true
             )
-            tab.pendingRestoreURL = restoredURL(from: snapshot.url)
-            let sessionSnapshot = sessionStore.loadSnapshot(for: tab.id)
+            tab.pendingRestoreURL = restoreURL
             if sessionSnapshot.canGoBack || sessionSnapshot.canGoForward {
                 _ = sessionStore.setOwnsNav(true, for: tab.id)
             }
