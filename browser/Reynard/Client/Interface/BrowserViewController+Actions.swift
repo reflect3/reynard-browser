@@ -119,6 +119,7 @@ extension BrowserViewController {
         case let .load(overrideURL):
             tab.pendingDisplayText = overrideURL
             tab.suppressInitialNavigation = false
+            tabManager.markNextNavigationAsReplace(for: tab)
             tab.session.updateSettings(GeckoSessionController.shared.sessionSettings(for: overrideURL, tabID: tab.id))
             tab.session.load(overrideURL, flags: GeckoSessionLoadFlags.replaceHistory)
         }

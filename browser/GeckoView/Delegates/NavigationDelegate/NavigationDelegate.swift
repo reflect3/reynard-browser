@@ -68,11 +68,12 @@ func newNavigationHandler(_ session: GeckoSession) -> GeckoSessionHandler {
                 )
             }
             
-            delegate?.onCanGoBack(session: session, canGoBack: message?["canGoBack"] as? Bool ?? false)
-            delegate?.onCanGoForward(
-                session: session,
-                canGoForward: message?["canGoForward"] as? Bool ?? false
-            )
+            if let canGoBack = message?["canGoBack"] as? Bool {
+                delegate?.onCanGoBack(session: session, canGoBack: canGoBack)
+            }
+            if let canGoForward = message?["canGoForward"] as? Bool {
+                delegate?.onCanGoForward(session: session, canGoForward: canGoForward)
+            }
             return nil
             
         case .onNewSession:

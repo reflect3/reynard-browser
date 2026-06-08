@@ -1,0 +1,21 @@
+diff --git a/build/moz.configure/toolchain.configure b/build/moz.configure/toolchain.configure
+--- a/build/moz.configure/toolchain.configure
++++ b/build/moz.configure/toolchain.configure
+@@ -1789,3 +1789,2 @@ def select_linker_tmpl(host_or_target):
+         # Check the kind of linker
+-        version_check = ["-Wl,--version"]
+         cmd_base = c_compiler.wrapper + [c_compiler.compiler] + c_compiler.flags
+@@ -1801,4 +1800,13 @@ def select_linker_tmpl(host_or_target):
+                 linker_flag = ["-fuse-ld=" + linker]
+             else:
+                 linker_flag = []
++            if target.kernel == "Darwin" and not (
++                linker and linker.startswith("lld")
++            ):
++                # New Apple linkers reject the GNU-style --version probe; use
++                # ld_classic -v for Darwin default/ld64 detection. See
++                # Mozilla bug 1844694.
++                version_check = ["-Wl,-ld_classic,-v"]
++            else:
++                version_check = ["-Wl,--version"]
+             cmd = cmd_base + linker_flag + version_check + toolchain_flags
