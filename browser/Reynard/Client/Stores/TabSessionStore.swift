@@ -9,6 +9,7 @@ import Foundation
 
 final class TabSessionStore {
     static let shared = TabSessionStore()
+    private static let maxHistoryEntries = 200
     
     enum ObservedNavigationIntent: Equatable {
         case back
@@ -42,6 +43,7 @@ final class TabSessionStore {
     private let fileManager: FileManager
     private let directoryURL: URL
     private let stateQueue = DispatchQueue(label: "com.minh-ton.tab-session-store", qos: .userInitiated)
+    private var cachedStates: [UUID: PersistedState] = [:]
     
     init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
@@ -61,13 +63,7 @@ final class TabSessionStore {
     
     func loadSnapshot(for tabID: UUID) -> Snapshot {
         stateQueue.sync {
-            let state = loadPersistedStateLocked(for: tabID)
-            return Snapshot(
-                currentURL: state.currentURL,
-                backList: state.backList,
-                forwardList: state.forwardList,
-                ownsNav: state.ownsNav ?? false
-            )
+            snapshot(from: stateLocked(for: tabID))
         }
     }
     
@@ -77,7 +73,7 @@ final class TabSessionStore {
     
     func recordObservedNavigation(to url: String, for tabID: UUID, intent: ObservedNavigationIntent?) -> Snapshot {
         stateQueue.sync {
-            var state = loadPersistedStateLocked(for: tabID)
+            var state = stateLocked(for: tabID)
             if state.currentURL == url {
                 switch intent {
                 case .back:
@@ -87,7 +83,7 @@ final class TabSessionStore {
                 default:
                     return snapshot(from: state)
                 }
-                savePersistedStateLocked(state, for: tabID)
+                saveStateLocked(state, for: tabID)
                 return snapshot(from: state)
             }
             
@@ -104,23 +100,23 @@ final class TabSessionStore {
                 recordInferredNavigationLocked(to: url, state: &state)
             }
             
-            savePersistedStateLocked(state, for: tabID)
+            saveStateLocked(state, for: tabID)
             return snapshot(from: state)
         }
     }
     
     func setOwnsNav(_ ownsNav: Bool, for tabID: UUID) -> Snapshot {
         stateQueue.sync {
-            var state = loadPersistedStateLocked(for: tabID)
+            var state = stateLocked(for: tabID)
             state.ownsNav = ownsNav
-            savePersistedStateLocked(state, for: tabID)
+            saveStateLocked(state, for: tabID)
             return snapshot(from: state)
         }
     }
     
     func previousURL(for tabID: UUID) -> String? {
         stateQueue.sync {
-            var state = loadPersistedStateLocked(for: tabID)
+            var state = stateLocked(for: tabID)
             guard let targetURL = state.backList.popLast() else {
                 return nil
             }
@@ -131,14 +127,14 @@ final class TabSessionStore {
             }
             
             state.currentURL = targetURL
-            savePersistedStateLocked(state, for: tabID)
+            saveStateLocked(state, for: tabID)
             return targetURL
         }
     }
     
     func nextURL(for tabID: UUID) -> String? {
         stateQueue.sync {
-            var state = loadPersistedStateLocked(for: tabID)
+            var state = stateLocked(for: tabID)
             guard !state.forwardList.isEmpty else {
                 return nil
             }
@@ -150,13 +146,14 @@ final class TabSessionStore {
             }
             
             state.currentURL = targetURL
-            savePersistedStateLocked(state, for: tabID)
+            saveStateLocked(state, for: tabID)
             return targetURL
         }
     }
     
     func removeSession(for tabID: UUID) {
         stateQueue.async {
+            self.cachedStates[tabID] = nil
             let fileURL = self.fileURL(for: tabID)
             guard self.fileManager.fileExists(atPath: fileURL.path) else {
                 return
@@ -168,6 +165,17 @@ final class TabSessionStore {
     
     private func prepareStorageLocked() {
         try? fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+    }
+
+    private func stateLocked(for tabID: UUID) -> PersistedState {
+        if let state = cachedStates[tabID] {
+            return state
+        }
+
+        var state = loadPersistedStateLocked(for: tabID)
+        trimHistoryLocked(&state)
+        cachedStates[tabID] = state
+        return state
     }
     
     private func recordNewNavigationLocked(to url: String, state: inout PersistedState) {
@@ -279,12 +287,29 @@ final class TabSessionStore {
         return decoded
     }
     
+    private func saveStateLocked(_ state: PersistedState, for tabID: UUID) {
+        var state = state
+        trimHistoryLocked(&state)
+        cachedStates[tabID] = state
+        savePersistedStateLocked(state, for: tabID)
+    }
+
     private func savePersistedStateLocked(_ state: PersistedState, for tabID: UUID) {
         guard let data = try? JSONEncoder().encode(state) else {
             return
         }
         
         try? data.write(to: fileURL(for: tabID), options: .atomic)
+    }
+
+    private func trimHistoryLocked(_ state: inout PersistedState) {
+        if state.backList.count > Self.maxHistoryEntries {
+            state.backList.removeFirst(state.backList.count - Self.maxHistoryEntries)
+        }
+
+        if state.forwardList.count > Self.maxHistoryEntries {
+            state.forwardList.removeLast(state.forwardList.count - Self.maxHistoryEntries)
+        }
     }
     
     private func snapshot(from state: PersistedState) -> Snapshot {

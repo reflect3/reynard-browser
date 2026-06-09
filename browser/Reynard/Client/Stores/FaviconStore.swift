@@ -19,6 +19,7 @@ final class FaviconStore {
     private static let maxHTMLBytes = 768 * 1024
     private static let maxImageBytes = 2 * 1024 * 1024
     private static let maxRedirectDepth = 3
+    private static let pruneInterval: TimeInterval = 24 * 60 * 60
     
     private struct StorageURLs {
         let directoryURL: URL
@@ -39,6 +40,11 @@ final class FaviconStore {
         let image: UIImage
         let data: Data
         let url: URL
+    }
+
+    private struct ActiveRequest {
+        let id: UUID
+        let task: Task<UIImage?, Never>
     }
     
     private let fileManager: FileManager
@@ -68,7 +74,8 @@ final class FaviconStore {
         options: []
     )
     
-    private var activeRequests: [String: Task<UIImage?, Never>] = [:]
+    private var activeRequests: [String: ActiveRequest] = [:]
+    private var lastPrunedAt: Date?
     
     init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
@@ -122,10 +129,18 @@ final class FaviconStore {
         }
         
         let requestKey = requestScopeKey(for: pageURL)
-        if let activeRequest = stateQueue.sync(execute: { activeRequests[requestKey] }) {
-            return await activeRequest.value
+        let activeRequest = stateQueue.sync {
+            activeRequestLocked(for: requestKey, pageURL: pageURL)
+        }
+        return await activeRequest.task.value
+    }
+
+    private func activeRequestLocked(for requestKey: String, pageURL: URL) -> ActiveRequest {
+        if let activeRequest = activeRequests[requestKey] {
+            return activeRequest
         }
         
+        let requestID = UUID()
         let task = Task<UIImage?, Never>(priority: .utility) { [weak self] in
             guard let self else {
                 return nil
@@ -133,15 +148,21 @@ final class FaviconStore {
             
             let image = await self.fetchAndCacheFavicon(for: pageURL)
             self.stateQueue.async {
-                self.activeRequests[requestKey] = nil
+                self.clearActiveRequestLocked(for: requestKey, requestID: requestID)
             }
             return image
         }
+        let activeRequest = ActiveRequest(id: requestID, task: task)
+        activeRequests[requestKey] = activeRequest
+        return activeRequest
+    }
         
-        stateQueue.sync {
-            activeRequests[requestKey] = task
+    private func clearActiveRequestLocked(for requestKey: String, requestID: UUID) {
+        guard activeRequests[requestKey]?.id == requestID else {
+            return
         }
-        return await task.value
+
+        activeRequests[requestKey] = nil
     }
     
     private func prepareStorageLocked() {
@@ -207,8 +228,6 @@ final class FaviconStore {
     }
     
     private func cachedImageLocked(for pageURL: URL, now: Date) -> UIImage? {
-        pruneExpiredEntriesLocked(now: now)
-        
         guard let association = lookupAssociationLocked(for: pageURL),
               let image = loadImageLocked(for: association.imageKey) else {
             return nil
@@ -260,7 +279,6 @@ final class FaviconStore {
     private func associateExistingIconIfPresent(_ iconURL: URL, with pageURL: URL) -> UIImage? {
         stateQueue.sync {
             let now = Date()
-            pruneExpiredEntriesLocked(now: now)
             
             guard let imageKey = imageKeyLocked(forSourceURL: iconURL.absoluteString),
                   let image = loadImageLocked(for: imageKey) else {
@@ -301,12 +319,27 @@ final class FaviconStore {
             _ = executeLocked("ROLLBACK TRANSACTION;")
             return
         }
+
+        pruneExpiredEntriesIfNeededLocked(now: now)
+    }
+
+    private func pruneExpiredEntriesIfNeededLocked(now: Date) {
+        if let lastPrunedAt,
+           now.timeIntervalSince(lastPrunedAt) < Self.pruneInterval {
+            return
+        }
+
+        pruneExpiredEntriesLocked(now: now)
     }
     
     private func pruneExpiredEntriesLocked(now: Date) {
-        let imageKeysBeforePruning = Set(fetchImageKeysLocked())
         let startOfToday = Calendar.current.startOfDay(for: now)
         let cutoff = (Calendar.current.date(byAdding: .day, value: 1 - Self.expirationDays, to: startOfToday) ?? startOfToday).timeIntervalSince1970
+        let imageKeysToCheck = Set(
+            fetchExpiredAssociationImageKeysLocked(cutoff: cutoff) +
+            fetchExpiredImageKeysLocked(cutoff: cutoff) +
+            fetchOrphanImageKeysLocked()
+        )
         
         _ = deleteExpiredAssociationsLocked(cutoff: cutoff)
         _ = deleteExpiredImagesLocked(cutoff: cutoff)
@@ -320,13 +353,13 @@ final class FaviconStore {
             """
         )
         
-        let imageKeysAfterPruning = Set(fetchImageKeysLocked())
-        for imageKey in imageKeysBeforePruning where !imageKeysAfterPruning.contains(imageKey) {
+        for imageKey in imageKeysToCheck where !imageExistsLocked(imageKey) {
             let imageURL = imageFileURL(for: imageKey)
             if fileManager.fileExists(atPath: imageURL.path) {
                 try? fileManager.removeItem(at: imageURL)
             }
         }
+        lastPrunedAt = now
     }
     
     private func lookupAssociationLocked(for pageURL: URL) -> SiteAssociation? {
@@ -541,9 +574,54 @@ final class FaviconStore {
         return sqlite3_step(statement) == SQLITE_DONE
     }
     
-    private func fetchImageKeysLocked() -> [String] {
+    private func fetchExpiredAssociationImageKeysLocked(cutoff: TimeInterval) -> [String] {
         guard let statement = prepareStatementLocked(
-            "SELECT image_key FROM favicon_images;"
+            "SELECT image_key FROM favicon_associations WHERE updated_at < ?;"
+        ) else {
+            return []
+        }
+
+        defer {
+            sqlite3_finalize(statement)
+        }
+
+        sqlite3_bind_double(statement, 1, cutoff)
+        var imageKeys: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            imageKeys.append(string(from: statement, at: 0))
+        }
+        return imageKeys
+    }
+
+    private func fetchExpiredImageKeysLocked(cutoff: TimeInterval) -> [String] {
+        guard let statement = prepareStatementLocked(
+            "SELECT image_key FROM favicon_images WHERE updated_at < ?;"
+        ) else {
+            return []
+        }
+
+        defer {
+            sqlite3_finalize(statement)
+        }
+
+        sqlite3_bind_double(statement, 1, cutoff)
+        var imageKeys: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            imageKeys.append(string(from: statement, at: 0))
+        }
+        return imageKeys
+    }
+
+    private func fetchOrphanImageKeysLocked() -> [String] {
+        guard let statement = prepareStatementLocked(
+            """
+            SELECT image_key
+            FROM favicon_images
+            WHERE image_key NOT IN (
+                SELECT image_key
+                FROM favicon_associations
+            );
+            """
         ) else {
             return []
         }
@@ -557,6 +635,21 @@ final class FaviconStore {
             imageKeys.append(string(from: statement, at: 0))
         }
         return imageKeys
+    }
+
+    private func imageExistsLocked(_ imageKey: String) -> Bool {
+        guard let statement = prepareStatementLocked(
+            "SELECT 1 FROM favicon_images WHERE image_key = ? LIMIT 1;"
+        ) else {
+            return true
+        }
+
+        defer {
+            sqlite3_finalize(statement)
+        }
+
+        bind(imageKey, to: statement, at: 1)
+        return sqlite3_step(statement) == SQLITE_ROW
     }
     
     private func deleteExpiredAssociationsLocked(cutoff: TimeInterval) -> Bool {

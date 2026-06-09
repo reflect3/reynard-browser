@@ -87,6 +87,7 @@ final class FilePicker: NSObject {
     private var anchorButton: FileMenuAnchorButton?
     private weak var presentedController: UIViewController?
     private var launchedFollowupPicker = false
+    private var didFinish = false
     
     init(
         promptId: String,
@@ -106,6 +107,13 @@ final class FilePicker: NSObject {
             .appendingPathComponent("GeckoFilePicker", isDirectory: true)
             .appendingPathComponent(promptId, isDirectory: true)
         super.init()
+    }
+
+    deinit {
+        guard let continuation else {
+            return
+        }
+        continuation.resume(returning: nil)
     }
     
     func present() async -> [String: Any]? {
@@ -485,7 +493,8 @@ final class FilePicker: NSObject {
     }
     
     private func finish(with result: [String: Any]?) {
-        guard let continuation else { return }
+        guard !didFinish, let continuation else { return }
+        didFinish = true
         self.continuation = nil
         continuation.resume(returning: result)
     }

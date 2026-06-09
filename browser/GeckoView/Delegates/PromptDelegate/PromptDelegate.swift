@@ -350,7 +350,9 @@ func newPromptHandler(_ session: GeckoSession) -> GeckoSessionHandler {
                 activeFilePickers[promptId] = picker
                 
                 let result = await picker.present()
-                activeFilePickers.removeValue(forKey: promptId)
+                if activeFilePickers[promptId] === picker {
+                    activeFilePickers.removeValue(forKey: promptId)
+                }
                 return result
             }
             
@@ -396,10 +398,16 @@ func newPromptHandler(_ session: GeckoSession) -> GeckoSessionHandler {
             return nil
             
         case .promptDismiss:
-            // Gecko fires dismiss when the <select> element blurs, which happens when
-            // we present native UI (the modal steals focus). Our picker manages its own
-            // lifecycle through user interaction, so we intentionally ignore dismiss
-            // while a picker is actively presented.
+            let promptData = (message["prompt"] as? [String: Any]) ?? message
+            let promptId = promptData["id"] as? String ?? ""
+            let promptType = promptData["type"] as? String ?? ""
+            if (promptType.isEmpty || promptType == "file"),
+               let picker = activeFilePickers.removeValue(forKey: promptId) {
+                picker.cancelAndDismiss()
+            }
+            // Gecko fires dismiss when some input elements blur, which also happens
+            // when native UI steals focus. Non-file pickers keep managing their own
+            // lifecycle through user interaction.
             return nil
         }
     }
