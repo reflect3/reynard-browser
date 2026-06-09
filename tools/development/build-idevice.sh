@@ -9,7 +9,7 @@ SUBMODULE_PATH="$REPO_ROOT/support/idevice"
 FFI_DIR="$SUBMODULE_PATH/ffi"
 OUTPUT_LIB="$REPO_ROOT/browser/Reynard/JIT/libidevice_ffi.a"
 
-TARGET_DIR="$SUBMODULE_PATH/target"
+CARGO_TARGET_DIR="$SUBMODULE_PATH/target"
 DEPLOYMENT_TARGET="13.0"
 
 if [ ! -e "$SUBMODULE_PATH/.git" ]; then
@@ -29,9 +29,22 @@ if [ -n "${RUSTFLAGS:-}" ]; then
 else
   export RUSTFLAGS="-C link-arg=${DEPLOYMENT_FLAG}"
 fi
-export TARGET_DIR
+export CARGO_TARGET_DIR
 
 mkdir -p "$(dirname "$OUTPUT_LIB")"
 cd "$FFI_DIR"
-cargo build --release --target "$RUST_TARGET" --no-default-features --features full,ring
-cp "$TARGET_DIR/$RUST_TARGET/release/libidevice_ffi.a" "$OUTPUT_LIB"
+cargo build \
+  --release \
+  --target "$RUST_TARGET" \
+  --target-dir "$CARGO_TARGET_DIR" \
+  --no-default-features \
+  --features full,ring
+
+BUILT_LIB="$CARGO_TARGET_DIR/$RUST_TARGET/release/libidevice_ffi.a"
+
+if [[ ! -f "$BUILT_LIB" ]]; then
+  echo "Missing built idevice FFI library: $BUILT_LIB"
+  exit 1
+fi
+
+cp "$BUILT_LIB" "$OUTPUT_LIB"

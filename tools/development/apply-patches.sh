@@ -66,6 +66,12 @@ for patch_file in $patch_files; do
 	echo "Applying $rel_path..."
 
 	if ! git -C "$SUBMODULE_PATH" apply --3way --whitespace=nowarn "$patch_file"; then
+		if [[ "${CI:-}" == "true" || "${GITHUB_ACTIONS:-}" == "true" || ! -t 0 ]]; then
+			echo "Failed to apply $rel_path in CI or non-interactive mode."
+			echo "Resolve conflicts locally in $SUBMODULE_PATH, then rerun tools/development/apply-patches.sh."
+			exit 1
+		fi
+
 		echo "Failed to apply $rel_path."
 		echo "Resolve conflicts in $SUBMODULE_PATH, then press Enter to continue or type q to stop."
 		read -r response
