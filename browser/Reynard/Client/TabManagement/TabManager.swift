@@ -20,6 +20,7 @@ protocol TabManager: AnyObject {
     var selectedTabMode: TabMode { get }
     var selectedTabIndex: Int { get }
     var selectedTab: Tab? { get }
+    var selectedTabIsNavigatingHistory: Bool { get }
     
     func createInitialTab()
     @discardableResult
@@ -32,7 +33,8 @@ protocol TabManager: AnyObject {
     func removeAllTabs(mode: TabMode?)
     func browse(to term: String)
     func browse(to term: String, in tab: Tab)
-    func markNextNavigationAsReplace(for tab: Tab)
+    func replaceCurrentEntry(with url: String, in tab: Tab)
+    func recoverCrashedTab(_ tab: Tab)
     func goBack()
     func goForward()
     func replaceSession(with session: GeckoSession, url: String, title: String?)
@@ -48,6 +50,7 @@ enum TabManagerUpdateReason {
     case navigationState
     case loading
     case thumbnail
+    case contentState
 }
 
 protocol TabManagerDelegate: AnyObject {

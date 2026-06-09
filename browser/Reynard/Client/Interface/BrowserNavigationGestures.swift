@@ -76,6 +76,7 @@ final class BrowserNavigationGestures: NSObject {
 
     private var canStartNavigationGesture: Bool {
         guard controller.tabManager.selectedTab?.canNavigateBack == true,
+              !controller.tabManager.selectedTabIsNavigatingHistory,
               !controller.isSearchFocused,
               !controller.isSearchScrollMode,
               !controller.tabOverviewPresentation.isVisible,

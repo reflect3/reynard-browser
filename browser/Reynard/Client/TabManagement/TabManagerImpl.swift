@@ -9,30 +9,8 @@ import Foundation
 import GeckoView
 import UIKit
 
-private enum PendingHistoryDirection {
-    case back
-    case forward
-}
-
-private final class PendingHistoryNavigation {
-    let direction: PendingHistoryDirection
-    let token: UUID
-    let startedURL: String?
-    let expectedURL: String?
-    weak var session: GeckoSession?
-    var fallbackTask: Task<Void, Never>?
-    
-    init(direction: PendingHistoryDirection, token: UUID, startedURL: String?, expectedURL: String?, session: GeckoSession) {
-        self.direction = direction
-        self.token = token
-        self.startedURL = startedURL
-        self.expectedURL = expectedURL
-        self.session = session
-    }
-}
-
 final class TabManagerImplementation: NSObject, TabManager {
-    private static let pendingHistoryFallbackDelayNanoseconds: UInt64 = 900_000_000
+    private static let sessionHistoryWatchdogDelayNanoseconds: UInt64 = 2_000_000_000
     
     private(set) var regularTabs: [Tab] = []
     private(set) var privateTabs: [Tab] = []
@@ -47,6 +25,14 @@ final class TabManagerImplementation: NSObject, TabManager {
     var selectedTab: Tab? {
         tabs(for: selectedTabMode)[safe: selectedTabIndex]
     }
+
+    var selectedTabIsNavigatingHistory: Bool {
+        guard let tab = selectedTab else {
+            return false
+        }
+
+        return tab.navigationTransaction?.isPendingHistoryNavigation == true
+    }
     
     private weak var delegate: TabManagerDelegate?
     private let store: TabManagementStore
@@ -54,9 +40,6 @@ final class TabManagerImplementation: NSObject, TabManager {
     private let historyStore: HistoryStore
     private let sessionStore: TabSessionStore
     private var faviconTasks: [UUID: Task<Void, Never>] = [:]
-    private var pendingHistoryNavigations: [UUID: PendingHistoryNavigation] = [:]
-    private var pendingObservedNavigationIntents: [UUID: TabSessionStore.ObservedNavigationIntent] = [:]
-    private var replaceNavigationTabIDs: Set<UUID> = []
     private var selectionCounter = 0
     
     private lazy var isURLLenient: NSRegularExpression = {
@@ -164,22 +147,17 @@ final class TabManagerImplementation: NSObject, TabManager {
         tab.session.load(url)
     }
     
-    private func loadHistoryURL(_ url: String, in tab: Tab) {
-        replaceNavigationTabIDs.insert(tab.id)
-        pendingObservedNavigationIntents[tab.id] = .replace
-        tab.session.updateSettings(GeckoSessionController.shared.sessionSettings(for: url, tabID: tab.id))
-        tab.session.load(url, flags: GeckoSessionLoadFlags.replaceHistory)
-    }
-    
     private func applyNavigationState(to tab: Tab, from snapshot: TabSessionStore.Snapshot) {
-        if snapshot.ownsNav {
+        if tab.sessionCanGoBack || tab.sessionCanGoForward {
+            tab.canNavigateBack = tab.sessionCanGoBack
+            tab.canNavigateForward = tab.sessionCanGoForward
+        } else if snapshot.ownsNav {
             tab.canNavigateBack = snapshot.canGoBack
             tab.canNavigateForward = snapshot.canGoForward
-            return
+        } else {
+            tab.canNavigateBack = false
+            tab.canNavigateForward = false
         }
-        
-        tab.canNavigateBack = snapshot.canGoBack || tab.sessionCanGoBack
-        tab.canNavigateForward = snapshot.canGoForward || tab.sessionCanGoForward
     }
     
     private func applyNavigationState(to tab: Tab) {
@@ -187,22 +165,24 @@ final class TabManagerImplementation: NSObject, TabManager {
         applyNavigationState(to: tab, from: snapshot)
     }
     
+    @discardableResult
     private func recordNavigation(
         _ url: String,
         for tab: Tab,
         intent: TabSessionStore.ObservedNavigationIntent? = .normal
-    ) {
+    ) -> TabSessionStore.Snapshot? {
         let trimmedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedURL.isEmpty,
               trimmedURL.lowercased() != "about:blank" else {
-            return
+            return nil
         }
         
         let snapshot = sessionStore.recordObservedNavigation(to: trimmedURL, for: tab.id, intent: intent)
         applyNavigationState(to: tab, from: snapshot)
+        return snapshot
     }
     
-    private func observedNavigationIntent(forHistoryDirection direction: PendingHistoryDirection) -> TabSessionStore.ObservedNavigationIntent {
+    private func observedNavigationIntent(forHistoryDirection direction: NavigationTransaction.Direction) -> TabSessionStore.ObservedNavigationIntent {
         switch direction {
         case .back:
             return .back
@@ -220,37 +200,12 @@ final class TabManagerImplementation: NSObject, TabManager {
         return trimmedValue
     }
     
-    private func shouldWaitForMeaningfulHistoryChange(_ pending: PendingHistoryNavigation, observedURL: String) -> Bool {
-        let observedURL = normalizedNavigationURL(observedURL)
-        let startedURL = normalizedNavigationURL(pending.startedURL)
-        guard observedURL == startedURL else {
-            return false
-        }
-
-        guard let expectedURL = normalizedNavigationURL(pending.expectedURL) else {
-            return true
-        }
-        return expectedURL != startedURL
-    }
-
-    private func clearPendingHistoryNavigation(for tabID: UUID, token: UUID? = nil) {
-        guard let pending = pendingHistoryNavigations[tabID] else {
-            return
-        }
-        
-        if let token,
-           pending.token != token {
-            return
-        }
-        
-        pending.fallbackTask?.cancel()
-        pendingHistoryNavigations.removeValue(forKey: tabID)
-    }
-    
     private func clearPendingNavigationState(for tabID: UUID) {
-        clearPendingHistoryNavigation(for: tabID)
-        pendingObservedNavigationIntents.removeValue(forKey: tabID)
-        replaceNavigationTabIDs.remove(tabID)
+        guard let location = tabLocation(for: tabID) else {
+            return
+        }
+        let tab = tabs(for: location.mode)[location.index]
+        cancelNavigationTransaction(for: tab)
     }
 
     private func clearTabScopedState(for tab: Tab) {
@@ -260,73 +215,223 @@ final class TabManagerImplementation: NSObject, TabManager {
         SitePermissionStore.shared.removePrivateTabPerms(for: tab.session)
         sessionStore.removeSession(for: tab.id)
     }
-    
-    private func startPendingHistoryNavigation(
+
+    @discardableResult
+    private func beginNavigationTransaction(
         for tab: Tab,
-        direction: PendingHistoryDirection,
-        expectedURL: String?
-    ) {
-        clearPendingNavigationState(for: tab.id)
-        let token = UUID()
-        let pending = PendingHistoryNavigation(
-            direction: direction,
-            token: token,
+        kind: NavigationTransaction.Kind,
+        requestedURL: String? = nil,
+        expectedURL: String? = nil,
+        usesReplaceHistory: Bool = false,
+        source: NavigationTransaction.Source
+    ) -> NavigationTransaction {
+        cancelNavigationTransaction(for: tab)
+        let transaction = NavigationTransaction(
+            kind: kind,
             startedURL: tab.url,
+            requestedURL: requestedURL,
             expectedURL: expectedURL,
-            session: tab.session
+            session: tab.session,
+            usesReplaceHistory: usesReplaceHistory,
+            source: source,
+            startedCanGoBack: tab.sessionCanGoBack,
+            startedCanGoForward: tab.sessionCanGoForward
         )
-        pendingHistoryNavigations[tab.id] = pending
-        
+        tab.navigationTransaction = transaction
+        return transaction
+    }
+
+    private func activeNavigationTransaction(for tab: Tab, session: GeckoSession? = nil) -> NavigationTransaction? {
+        guard let transaction = tab.navigationTransaction else {
+            return nil
+        }
+        if let session,
+           transaction.session !== session {
+            cancelNavigationTransaction(for: tab)
+            return nil
+        }
+        return transaction
+    }
+
+    private func cancelNavigationTransaction(for tab: Tab) {
+        tab.navigationTransaction?.watchdogTask?.cancel()
+        tab.navigationTransaction?.phase = .cancelled
+        tab.navigationTransaction = nil
+    }
+
+    private func finishNavigationTransaction(for tab: Tab, transaction: NavigationTransaction? = nil) {
+        guard let current = tab.navigationTransaction else {
+            return
+        }
+        if let transaction,
+           current.id != transaction.id {
+            return
+        }
+        current.watchdogTask?.cancel()
+        current.phase = .committed
+        tab.navigationTransaction = nil
+    }
+
+    private func markNavigationTransactionCommitted(for tab: Tab, transaction: NavigationTransaction) {
+        guard tab.navigationTransaction?.id == transaction.id else {
+            return
+        }
+
+        transaction.phase = .committed
+    }
+
+    private func completeSessionHistoryTransactionIfNavigationStateChanged(
+        for tab: Tab,
+        at location: (mode: TabMode, index: Int)
+    ) {
+        guard let transaction = activeNavigationTransaction(for: tab),
+              transaction.isPendingHistoryNavigation,
+              case .sessionHistory = transaction.kind else {
+            return
+        }
+
+        let navigationStateChanged = tab.sessionCanGoBack != transaction.startedCanGoBack ||
+            tab.sessionCanGoForward != transaction.startedCanGoForward
+        guard navigationStateChanged else {
+            return
+        }
+
+        markNavigationTransactionCommitted(for: tab, transaction: transaction)
+        applyNavigationState(to: tab)
+        notifyUpdate(at: location.index, mode: location.mode, reason: .navigationState)
+    }
+
+    private func isCrashRecoveryTransaction(_ transaction: NavigationTransaction) -> Bool {
+        if case .crashRecovery = transaction.source {
+            return true
+        }
+
+        return false
+    }
+
+    private func terminationReason(for tab: Tab) -> ContentTerminationReason {
+        switch tab.contentTerminationState {
+        case let .crashed(_, reason), let .recovering(_, reason):
+            return reason
+        case .normal:
+            return .crash
+        }
+    }
+
+    private func recoveryTargetURL(for tab: Tab, transaction: NavigationTransaction) -> String? {
+        transaction.recoveryTargetURL ?? transaction.requestedURL ?? transaction.observedURL ?? tab.crashedURL ?? tab.url
+    }
+
+    private func updateCrashRecoveryStateAfterPageStop(
+        for tab: Tab,
+        transaction: NavigationTransaction,
+        success: Bool,
+        at location: (mode: TabMode, index: Int)
+    ) {
+        guard isCrashRecoveryTransaction(transaction) else {
+            return
+        }
+
+        if success,
+           transaction.hasSatisfiedRecoveryTarget {
+            tab.contentTerminationState = .normal
+        } else {
+            tab.contentTerminationState = .crashed(
+                url: recoveryTargetURL(for: tab, transaction: transaction),
+                reason: terminationReason(for: tab)
+            )
+        }
+
+        notifyUpdate(at: location.index, mode: location.mode, reason: .contentState)
+    }
+
+    private func dispatchLoad(_ transaction: NavigationTransaction, in tab: Tab) {
+        guard let requestedURL = transaction.requestedURL else {
+            return
+        }
+
+        transaction.phase = .loadRequested
+        tab.session.updateSettings(GeckoSessionController.shared.sessionSettings(for: requestedURL, tabID: tab.id))
+        if transaction.usesReplaceHistory {
+            tab.session.load(requestedURL, flags: GeckoSessionLoadFlags.replaceHistory)
+        } else {
+            tab.session.load(requestedURL)
+        }
+    }
+
+    private func startSessionHistoryWatchdog(for tab: Tab, transactionID: UUID) {
+        tab.navigationTransaction?.watchdogTask?.cancel()
         let tabID = tab.id
-        pending.fallbackTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: Self.pendingHistoryFallbackDelayNanoseconds)
+        tab.navigationTransaction?.watchdogTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.sessionHistoryWatchdogDelayNanoseconds)
             guard !Task.isCancelled else {
                 return
             }
             await MainActor.run {
-                self?.handlePendingHistoryFallback(for: tabID, token: token)
+                self?.handleSessionHistoryWatchdog(for: tabID, transactionID: transactionID)
             }
         }
     }
-    
+
     @MainActor
-    private func handlePendingHistoryFallback(for tabID: UUID, token: UUID) {
-        guard let pending = pendingHistoryNavigations[tabID],
-              pending.token == token,
-              let location = tabLocation(for: tabID) else {
+    private func handleSessionHistoryWatchdog(for tabID: UUID, transactionID: UUID) {
+        guard let location = tabLocation(for: tabID) else {
             return
         }
-        
         let tab = tabs(for: location.mode)[location.index]
-        guard pending.session === tab.session else {
-            clearPendingHistoryNavigation(for: tabID, token: token)
+        guard let transaction = tab.navigationTransaction,
+              transaction.id == transactionID else {
             return
         }
-        
-        guard normalizedNavigationURL(tab.url) == normalizedNavigationURL(pending.startedURL) else {
-            clearPendingHistoryNavigation(for: tabID, token: token)
-            return
-        }
-        
-        let targetURL: String?
-        switch pending.direction {
-        case .back:
-            targetURL = sessionStore.previousURL(for: tab.id)
-        case .forward:
-            targetURL = sessionStore.nextURL(for: tab.id)
-        }
-        
-        clearPendingHistoryNavigation(for: tabID, token: token)
-        guard let targetURL else {
+
+        if case .committed = transaction.phase {
+            tab.navigationTransaction = nil
             applyNavigationState(to: tab)
             notifyUpdate(at: location.index, mode: location.mode, reason: .navigationState)
             return
         }
-        
-        _ = sessionStore.setOwnsNav(true, for: tab.id)
+
+        transaction.phase = .cancelled
+        tab.navigationTransaction = nil
         applyNavigationState(to: tab)
         notifyUpdate(at: location.index, mode: location.mode, reason: .navigationState)
-        loadHistoryURL(targetURL, in: tab)
+    }
+
+    private func handleContentTermination(session: GeckoSession, reason: ContentTerminationReason) {
+        guard let location = tabLocation(for: session) else {
+            return
+        }
+
+        let tab = tabs(for: location.mode)[location.index]
+        let crashedURL = tab.url
+        clearPendingNavigationState(for: tab.id)
+        closeSession(tab.session)
+
+        let replacementSession = createSession(windowId: nil, isPrivate: tab.isPrivate)
+        let controller = NowPlayingController(session: replacementSession)
+        replacementSession.mediaSessionDelegate = controller
+        tab.session = replacementSession
+        tab.nowPlayingController = controller
+        tab.contentTerminationState = .crashed(url: crashedURL, reason: reason)
+        tab.isLoading = false
+        tab.progress = 0
+        tab.pendingDisplayText = nil
+        tab.suppressInitialNavigation = true
+        tab.sessionCanGoBack = false
+        tab.sessionCanGoForward = false
+        applyNavigationState(to: tab)
+
+        if location.mode == selectedTabMode,
+           location.index == selectedTabIndex {
+            replacementSession.setActive(true)
+            replacementSession.setFocused(true)
+        }
+
+        delegate?.tabManagerDidChangeTabs(self)
+        notifyUpdate(at: location.index, mode: location.mode, reason: .contentState)
+        notifyUpdate(at: location.index, mode: location.mode, reason: .loading)
+        notifyUpdate(at: location.index, mode: location.mode, reason: .navigationState)
+        persistState()
     }
     
     private func makeTab(windowId: String?, isPrivate: Bool) -> Tab {
@@ -782,75 +887,155 @@ final class TabManagerImplementation: NSObject, TabManager {
         
         tab.suppressInitialNavigation = false
         tab.pendingDisplayText = trimmedValue
-        clearPendingNavigationState(for: tab.id)
-        pendingObservedNavigationIntents[tab.id] = .normal
-        
+        tab.contentTerminationState = .normal
+
         let fullRange = NSRange(location: 0, length: (trimmedValue as NSString).length)
         let isURL = isURLLenient.firstMatch(in: trimmedValue, range: fullRange) != nil
-        
-        if isURL {
-            loadURL(trimmedValue, in: tab)
-            return
+        let targetURL = isURL ? trimmedValue : searchURL(for: trimmedValue)
+        let transaction = beginNavigationTransaction(
+            for: tab,
+            kind: .normal,
+            requestedURL: targetURL,
+            source: .userNavigation
+        )
+        dispatchLoad(transaction, in: tab)
+
+        if let location = tabLocation(for: tab.id) {
+            notifyUpdate(at: location.index, mode: location.mode, reason: .contentState)
         }
-        
-        let searchTarget = searchURL(for: trimmedValue)
-        loadURL(searchTarget, in: tab)
     }
     
     func goBack() {
         guard let tab = selectedTab else {
             return
         }
-        guard pendingHistoryNavigations[tab.id] == nil else {
+        guard tab.navigationTransaction?.isPendingHistoryNavigation != true else {
             return
         }
         
         let snapshot = sessionStore.loadSnapshot(for: tab.id)
-        if !snapshot.ownsNav && tab.sessionCanGoBack {
-            startPendingHistoryNavigation(for: tab, direction: .back, expectedURL: snapshot.backList.last)
+        if tab.sessionCanGoBack {
+            let transaction = beginNavigationTransaction(
+                for: tab,
+                kind: .sessionHistory(.back),
+                expectedURL: snapshot.backList.last,
+                source: .historyButton
+            )
+            delegate?.tabManager(self, didUpdateTabAt: selectedTabIndex, reason: .navigationState)
             tab.session.goBack()
+            startSessionHistoryWatchdog(for: tab, transactionID: transaction.id)
             return
         }
         
-        guard let url = sessionStore.previousURL(for: tab.id) else {
+        guard let url = sessionStore.peekPreviousURL(for: tab.id) else {
+            return
+        }
+        guard normalizedNavigationURL(url) != normalizedNavigationURL(tab.url) else {
+            applyNavigationState(to: tab)
+            delegate?.tabManager(self, didUpdateTabAt: selectedTabIndex, reason: .navigationState)
             return
         }
         
+        let transaction = beginNavigationTransaction(
+            for: tab,
+            kind: .applicationHistory(.back),
+            requestedURL: url,
+            expectedURL: url,
+            usesReplaceHistory: true,
+            source: .restoredAppHistory
+        )
         _ = sessionStore.setOwnsNav(true, for: tab.id)
         applyNavigationState(to: tab)
         delegate?.tabManager(self, didUpdateTabAt: selectedTabIndex, reason: .navigationState)
-        loadHistoryURL(url, in: tab)
+        dispatchLoad(transaction, in: tab)
     }
     
     func goForward() {
         guard let tab = selectedTab else {
             return
         }
-        guard pendingHistoryNavigations[tab.id] == nil else {
+        guard tab.navigationTransaction?.isPendingHistoryNavigation != true else {
             return
         }
         
         let snapshot = sessionStore.loadSnapshot(for: tab.id)
-        if !snapshot.ownsNav && tab.sessionCanGoForward {
-            startPendingHistoryNavigation(for: tab, direction: .forward, expectedURL: snapshot.forwardList.first)
+        if tab.sessionCanGoForward {
+            let transaction = beginNavigationTransaction(
+                for: tab,
+                kind: .sessionHistory(.forward),
+                expectedURL: snapshot.forwardList.first,
+                source: .historyButton
+            )
+            delegate?.tabManager(self, didUpdateTabAt: selectedTabIndex, reason: .navigationState)
             tab.session.goForward()
+            startSessionHistoryWatchdog(for: tab, transactionID: transaction.id)
             return
         }
         
-        guard let url = sessionStore.nextURL(for: tab.id) else {
+        guard let url = sessionStore.peekNextURL(for: tab.id) else {
+            return
+        }
+        guard normalizedNavigationURL(url) != normalizedNavigationURL(tab.url) else {
+            applyNavigationState(to: tab)
+            delegate?.tabManager(self, didUpdateTabAt: selectedTabIndex, reason: .navigationState)
             return
         }
         
+        let transaction = beginNavigationTransaction(
+            for: tab,
+            kind: .applicationHistory(.forward),
+            requestedURL: url,
+            expectedURL: url,
+            usesReplaceHistory: true,
+            source: .restoredAppHistory
+        )
         _ = sessionStore.setOwnsNav(true, for: tab.id)
         applyNavigationState(to: tab)
         delegate?.tabManager(self, didUpdateTabAt: selectedTabIndex, reason: .navigationState)
-        loadHistoryURL(url, in: tab)
+        dispatchLoad(transaction, in: tab)
     }
     
-    func markNextNavigationAsReplace(for tab: Tab) {
-        clearPendingNavigationState(for: tab.id)
-        replaceNavigationTabIDs.insert(tab.id)
-        pendingObservedNavigationIntents[tab.id] = .replace
+    func replaceCurrentEntry(with url: String, in tab: Tab) {
+        tab.pendingDisplayText = url
+        tab.suppressInitialNavigation = false
+        let transaction = beginNavigationTransaction(
+            for: tab,
+            kind: .replace,
+            requestedURL: url,
+            usesReplaceHistory: true,
+            source: .websiteModeChange
+        )
+        dispatchLoad(transaction, in: tab)
+    }
+
+    func recoverCrashedTab(_ tab: Tab) {
+        guard let targetURL = tab.crashedURL ?? tab.url,
+              !targetURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+
+        let reason: ContentTerminationReason
+        switch tab.contentTerminationState {
+        case let .crashed(_, terminationReason), let .recovering(_, terminationReason):
+            reason = terminationReason
+        case .normal:
+            reason = .crash
+        }
+
+        tab.contentTerminationState = .recovering(url: targetURL, reason: reason)
+        tab.suppressInitialNavigation = false
+        tab.pendingDisplayText = targetURL
+        let transaction = beginNavigationTransaction(
+            for: tab,
+            kind: .normal,
+            requestedURL: targetURL,
+            source: .crashRecovery
+        )
+        dispatchLoad(transaction, in: tab)
+
+        if let location = tabLocation(for: tab.id) {
+            notifyUpdate(at: location.index, mode: location.mode, reason: .contentState)
+        }
     }
     
     func replaceSession(with session: GeckoSession, url: String, title: String?) {
@@ -979,22 +1164,34 @@ extension TabManagerImplementation: ContentDelegate {
     }
     
     func onCrash(session: GeckoSession) {
-        guard let location = tabLocation(for: session) else {
-            return
-        }
-        removeTab(at: location.index, mode: location.mode)
+        handleContentTermination(session: session, reason: .crash)
     }
     
     func onKill(session: GeckoSession) {
-        guard let location = tabLocation(for: session) else {
-            return
-        }
-        removeTab(at: location.index, mode: location.mode)
+        handleContentTermination(session: session, reason: .kill)
     }
     
     func onFirstComposite(session: GeckoSession) {}
     
-    func onFirstContentfulPaint(session: GeckoSession) {}
+    func onFirstContentfulPaint(session: GeckoSession) {
+        guard let location = tabLocation(for: session) else {
+            return
+        }
+
+        let tab = tabs(for: location.mode)[location.index]
+        guard tab.contentTerminationState.isRecovering else {
+            return
+        }
+
+        guard let transaction = activeNavigationTransaction(for: tab, session: session),
+              isCrashRecoveryTransaction(transaction),
+              transaction.hasSatisfiedRecoveryTarget else {
+            return
+        }
+
+        tab.contentTerminationState = .normal
+        notifyUpdate(at: location.index, mode: location.mode, reason: .contentState)
+    }
     
     func onPaintStatusReset(session: GeckoSession) {}
     
@@ -1049,39 +1246,83 @@ extension TabManagerImplementation: NavigationDelegate {
               !observedURL.isEmpty else {
             return
         }
-        
-        let resolvedNavigationIntent: TabSessionStore.ObservedNavigationIntent?
-        let pendingHistory = pendingHistoryNavigations[tab.id]
-        if let pendingHistory,
-           pendingHistory.session === session {
-            if shouldWaitForMeaningfulHistoryChange(pendingHistory, observedURL: observedURL) {
-                return
-            }
-            resolvedNavigationIntent = observedNavigationIntent(forHistoryDirection: pendingHistory.direction)
-            clearPendingHistoryNavigation(for: tab.id, token: pendingHistory.token)
-            pendingObservedNavigationIntents.removeValue(forKey: tab.id)
-        } else {
-            if pendingHistory != nil {
-                clearPendingHistoryNavigation(for: tab.id)
-            }
-            if replaceNavigationTabIDs.contains(tab.id) {
-                resolvedNavigationIntent = .replace
-                pendingObservedNavigationIntents[tab.id] = .replace
-            } else {
-                resolvedNavigationIntent = pendingObservedNavigationIntents.removeValue(forKey: tab.id)
-            }
-        }
+
+        let transaction = activeNavigationTransaction(for: tab, session: session)
         tab.suppressInitialNavigation = false
         
         session.updateSettings(GeckoSessionController.shared.sessionSettings(for: observedURL, tabID: tab.id))
         SitePermissionController.shared.applyPermissions(to: session, urlString: observedURL)
         
         tab.url = observedURL
-        recordNavigation(observedURL, for: tab, intent: resolvedNavigationIntent)
+        if !tab.contentTerminationState.isRecovering {
+            tab.contentTerminationState = .normal
+        }
+
+        if let transaction,
+           transaction.hasCommittedLocation {
+            if transaction.shouldTreatAdditionalLocationAsRedirectFinalization {
+                transaction.recordLocationCommit(observedURL)
+                recordNavigation(observedURL, for: tab, intent: .replace)
+                markNavigationTransactionCommitted(for: tab, transaction: transaction)
+            } else {
+                finishNavigationTransaction(for: tab, transaction: transaction)
+                _ = sessionStore.setOwnsNav(false, for: tab.id)
+                recordNavigation(observedURL, for: tab, intent: nil)
+            }
+        } else if let transaction {
+            if transaction.canAcceptPageStart {
+                transaction.phase = .locationObserved
+            }
+            transaction.recordLocationCommit(observedURL)
+
+            switch transaction.kind {
+            case .applicationHistory(.back):
+                let snapshot: TabSessionStore.Snapshot
+                if let expectedURL = transaction.expectedURL {
+                    snapshot = sessionStore.commitPreviousURL(expectedURL: expectedURL, resolvedURL: observedURL, for: tab.id)
+                } else {
+                    snapshot = sessionStore.loadSnapshot(for: tab.id)
+                }
+                applyNavigationState(to: tab, from: snapshot)
+                markNavigationTransactionCommitted(for: tab, transaction: transaction)
+
+            case .applicationHistory(.forward):
+                let snapshot: TabSessionStore.Snapshot
+                if let expectedURL = transaction.expectedURL {
+                    snapshot = sessionStore.commitNextURL(expectedURL: expectedURL, resolvedURL: observedURL, for: tab.id)
+                } else {
+                    snapshot = sessionStore.loadSnapshot(for: tab.id)
+                }
+                applyNavigationState(to: tab, from: snapshot)
+                markNavigationTransactionCommitted(for: tab, transaction: transaction)
+
+            case let .sessionHistory(direction):
+                if normalizedNavigationURL(transaction.startedURL) != normalizedNavigationURL(observedURL) {
+                    _ = sessionStore.setOwnsNav(false, for: tab.id)
+                    recordNavigation(observedURL, for: tab, intent: observedNavigationIntent(forHistoryDirection: direction))
+                } else {
+                    applyNavigationState(to: tab)
+                }
+                markNavigationTransactionCommitted(for: tab, transaction: transaction)
+
+            case .replace:
+                recordNavigation(observedURL, for: tab, intent: .replace)
+                markNavigationTransactionCommitted(for: tab, transaction: transaction)
+
+            case .normal:
+                _ = sessionStore.setOwnsNav(false, for: tab.id)
+                recordNavigation(observedURL, for: tab, intent: .normal)
+                markNavigationTransactionCommitted(for: tab, transaction: transaction)
+            }
+        } else {
+            _ = sessionStore.setOwnsNav(false, for: tab.id)
+            recordNavigation(observedURL, for: tab, intent: nil)
+        }
         tab.pendingDisplayText = nil
         tab.favicon = nil
         notifyUpdate(at: location.index, mode: location.mode, reason: .location)
         notifyUpdate(at: location.index, mode: location.mode, reason: .navigationState)
+        notifyUpdate(at: location.index, mode: location.mode, reason: .contentState)
         scheduleFaviconUpdate(forTabAt: location.index, mode: location.mode)
         persistState()
         
@@ -1100,6 +1341,7 @@ extension TabManagerImplementation: NavigationDelegate {
         let tab = tabs(for: location.mode)[location.index]
         
         tab.sessionCanGoBack = canGoBack
+        completeSessionHistoryTransactionIfNavigationStateChanged(for: tab, at: location)
         applyNavigationState(to: tab)
         notifyUpdate(at: location.index, mode: location.mode, reason: .navigationState)
     }
@@ -1111,6 +1353,7 @@ extension TabManagerImplementation: NavigationDelegate {
         let tab = tabs(for: location.mode)[location.index]
         
         tab.sessionCanGoForward = canGoForward
+        completeSessionHistoryTransactionIfNavigationStateChanged(for: tab, at: location)
         applyNavigationState(to: tab)
         notifyUpdate(at: location.index, mode: location.mode, reason: .navigationState)
     }
@@ -1122,10 +1365,48 @@ extension TabManagerImplementation: NavigationDelegate {
         }
 
         let tab = tabs(for: location.mode)[location.index]
-        if pendingHistoryNavigations[tab.id] == nil,
-           pendingObservedNavigationIntents[tab.id] == nil,
-           !replaceNavigationTabIDs.contains(tab.id) {
-            pendingObservedNavigationIntents[tab.id] = .normal
+        if let transaction = activeNavigationTransaction(for: tab, session: session) {
+            if transaction.isTerminal {
+                finishNavigationTransaction(for: tab, transaction: transaction)
+                let newTransaction = beginNavigationTransaction(
+                    for: tab,
+                    kind: .normal,
+                    requestedURL: request.uri,
+                    source: .geckoLoadRequest
+                )
+                newTransaction.recordLoadRequest(
+                    uri: request.uri,
+                    triggerUri: request.triggerUri,
+                    isRedirect: request.isRedirect,
+                    hasUserGesture: request.hasUserGesture,
+                    isDirectNavigation: request.isDirectNavigation
+                )
+            } else {
+                transaction.recordLoadRequest(
+                    uri: request.uri,
+                    triggerUri: request.triggerUri,
+                    isRedirect: request.isRedirect,
+                    hasUserGesture: request.hasUserGesture,
+                    isDirectNavigation: request.isDirectNavigation
+                )
+                if case .created = transaction.phase {
+                    transaction.phase = .loadRequested
+                }
+            }
+        } else {
+            let transaction = beginNavigationTransaction(
+                for: tab,
+                kind: .normal,
+                requestedURL: request.uri,
+                source: .geckoLoadRequest
+            )
+            transaction.recordLoadRequest(
+                uri: request.uri,
+                triggerUri: request.triggerUri,
+                isRedirect: request.isRedirect,
+                hasUserGesture: request.hasUserGesture,
+                isDirectNavigation: request.isDirectNavigation
+            )
         }
 
         return .allow
@@ -1200,6 +1481,13 @@ extension TabManagerImplementation: ProgressDelegate {
         let currentHost = tab.url.flatMap { GeckoSessionController.shared.extractHost(from: $0) }
         let requestedHost = GeckoSessionController.shared.extractHost(from: url)
         let desiredSettings = GeckoSessionController.shared.sessionSettings(for: url, tabID: tab.id)
+        let transaction = activeNavigationTransaction(for: tab, session: session)
+        if let transaction,
+           case .committed = transaction.phase {
+            // 已由 Gecko native state-change 完成的事务保持 committed，避免 UI pending 回跳。
+        } else {
+            transaction?.phase = .pageStarted
+        }
         
         if currentHost != nil,
            requestedHost != nil,
@@ -1207,12 +1495,20 @@ extension TabManagerImplementation: ProgressDelegate {
            (desiredSettings.userAgentOverride != session.userAgentOverride ||
             desiredSettings.userAgentMode != session.userAgentMode ||
             desiredSettings.viewportMode != session.viewportMode) {
-            loadURL(url, in: tab)
+            if transaction?.isHistoryNavigation == true {
+                session.updateSettings(desiredSettings)
+            } else {
+                loadURL(url, in: tab)
+            }
         }
         
+        if !tab.contentTerminationState.isRecovering {
+            tab.contentTerminationState = .normal
+        }
         tab.isLoading = true
         tab.progress = 0
         notifyUpdate(at: location.index, mode: location.mode, reason: .loading)
+        notifyUpdate(at: location.index, mode: location.mode, reason: .contentState)
     }
     
     func onPageStop(session: GeckoSession, success: Bool) {
@@ -1220,13 +1516,39 @@ extension TabManagerImplementation: ProgressDelegate {
             return
         }
         let tab = tabs(for: location.mode)[location.index]
-        if replaceNavigationTabIDs.remove(tab.id) != nil,
-           pendingObservedNavigationIntents[tab.id] == .replace {
-            pendingObservedNavigationIntents.removeValue(forKey: tab.id)
+        if let transaction = activeNavigationTransaction(for: tab, session: session) {
+            let wasCommitted: Bool
+            if case .committed = transaction.phase {
+                wasCommitted = true
+            } else {
+                wasCommitted = false
+            }
+            transaction.phase = .stopped
+            if success || wasCommitted || transaction.hasCommittedLocation {
+                updateCrashRecoveryStateAfterPageStop(
+                    for: tab,
+                    transaction: transaction,
+                    success: success,
+                    at: location
+                )
+                if !transaction.hasCommittedLocation {
+                    applyNavigationState(to: tab)
+                }
+                finishNavigationTransaction(for: tab, transaction: transaction)
+            } else {
+                updateCrashRecoveryStateAfterPageStop(
+                    for: tab,
+                    transaction: transaction,
+                    success: false,
+                    at: location
+                )
+                cancelNavigationTransaction(for: tab)
+            }
         }
         
         tab.isLoading = false
         notifyUpdate(at: location.index, mode: location.mode, reason: .loading)
+        notifyUpdate(at: location.index, mode: location.mode, reason: .navigationState)
         notifyUpdate(at: location.index, mode: location.mode, reason: .thumbnail)
     }
     

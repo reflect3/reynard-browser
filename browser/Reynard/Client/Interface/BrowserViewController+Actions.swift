@@ -117,11 +117,7 @@ extension BrowserViewController {
             tab.session.updateSettings(GeckoSessionController.shared.sessionSettings(for: url, tabID: tab.id))
             tab.session.reload()
         case let .load(overrideURL):
-            tab.pendingDisplayText = overrideURL
-            tab.suppressInitialNavigation = false
-            tabManager.markNextNavigationAsReplace(for: tab)
-            tab.session.updateSettings(GeckoSessionController.shared.sessionSettings(for: overrideURL, tabID: tab.id))
-            tab.session.load(overrideURL, flags: GeckoSessionLoadFlags.replaceHistory)
+            tabManager.replaceCurrentEntry(with: overrideURL, in: tab)
         }
         
         refreshAddressBar()

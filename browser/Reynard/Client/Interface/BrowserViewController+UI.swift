@@ -190,13 +190,16 @@ extension BrowserViewController: AddressBarDelegate, BottomToolbarDelegate {
             return
         }
         
-        browserUI.bottomToolbar.updateBackButton(canGoBack: tab.canNavigateBack)
-        browserUI.bottomToolbar.updateForwardButton(canGoForward: tab.canNavigateForward)
+        let isHistoryPending = tabManager.selectedTabIsNavigatingHistory
+        let canGoBack = tab.canNavigateBack && !isHistoryPending
+        let canGoForward = tab.canNavigateForward && !isHistoryPending
+        browserUI.bottomToolbar.updateBackButton(canGoBack: canGoBack)
+        browserUI.bottomToolbar.updateForwardButton(canGoForward: canGoForward)
         let shareEnabled = tabManager.shareableURL(for: tab) != nil
         browserUI.bottomToolbar.updateShareButton(isEnabled: shareEnabled)
         browserUI.topBarButtons.shareButton.isEnabled = shareEnabled
-        browserUI.topBarButtons.backButton.isEnabled = tab.canNavigateBack
-        browserUI.topBarButtons.forwardButton.isEnabled = tab.canNavigateForward
+        browserUI.topBarButtons.backButton.isEnabled = canGoBack
+        browserUI.topBarButtons.forwardButton.isEnabled = canGoForward
     }
     
     @objc func addressBarPositionDidChange() {
@@ -324,6 +327,35 @@ extension BrowserViewController: AddressBarDelegate, BottomToolbarDelegate {
             )
         )
     }
+
+    func syncContentCrashUI() {
+        guard let selectedTab = tabManager.selectedTab else {
+            browserUI.contentCrashView.isHidden = true
+            return
+        }
+
+        switch selectedTab.contentTerminationState {
+        case .normal:
+            browserUI.contentCrashView.isHidden = true
+        case .crashed, .recovering:
+            browserUI.contentCrashView.configure(
+                for: selectedTab.contentTerminationState,
+                fallbackURL: selectedTab.crashedURL ?? selectedTab.url
+            )
+            browserUI.contentCrashView.isHidden = false
+        }
+    }
+
+    @objc func recoverCrashedContentRequested() {
+        guard let selectedTab = tabManager.selectedTab else {
+            return
+        }
+
+        tabManager.recoverCrashedTab(selectedTab)
+        refreshAddressBar()
+        syncContentCrashUI()
+    }
+
     func addressBarDidTapTrailingButton(_ addressBar: AddressBar) {
         guard let selectedTab = tabManager.selectedTab else {
             return
@@ -333,8 +365,120 @@ extension BrowserViewController: AddressBarDelegate, BottomToolbarDelegate {
             selectedTab.session.stop()
             return
         }
+
+        if selectedTab.isContentCrashed {
+            recoverCrashedContentRequested()
+            return
+        }
         
         selectedTab.session.reload()
+    }
+}
+
+final class ContentCrashView: UIView {
+    let retryButton = UIButton(type: .system)
+
+    private let stackView: UIStackView = {
+        let stackView = UIStackView()
+        stackView.translatesAutoresizingMaskIntoConstraints = false
+        stackView.axis = .vertical
+        stackView.alignment = .center
+        stackView.spacing = 14
+        return stackView
+    }()
+
+    private let titleLabel: UILabel = {
+        let label = UILabel()
+        label.font = .preferredFont(forTextStyle: .title2)
+        label.textColor = .label
+        label.textAlignment = .center
+        label.numberOfLines = 0
+        return label
+    }()
+
+    private let messageLabel: UILabel = {
+        let label = UILabel()
+        label.font = .preferredFont(forTextStyle: .body)
+        label.textColor = .secondaryLabel
+        label.textAlignment = .center
+        label.numberOfLines = 0
+        return label
+    }()
+
+    private let urlLabel: UILabel = {
+        let label = UILabel()
+        label.font = .preferredFont(forTextStyle: .footnote)
+        label.textColor = .tertiaryLabel
+        label.textAlignment = .center
+        label.numberOfLines = 2
+        label.lineBreakMode = .byTruncatingMiddle
+        return label
+    }()
+
+    private let activityIndicator = UIActivityIndicatorView(style: .medium)
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        configureView()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configureView()
+    }
+
+    func configure(for state: ContentTerminationState, fallbackURL: String?) {
+        urlLabel.text = fallbackURL
+
+        switch state {
+        case .normal:
+            titleLabel.text = nil
+            messageLabel.text = nil
+            retryButton.isHidden = true
+            activityIndicator.stopAnimating()
+        case let .crashed(_, reason):
+            switch reason {
+            case .kill:
+                titleLabel.text = "网页已被系统终止"
+            case .crash:
+                titleLabel.text = "网页已崩溃"
+            }
+            messageLabel.text = "这个页面意外停止运行。重新加载可以恢复内容。"
+            retryButton.isHidden = false
+            activityIndicator.stopAnimating()
+        case .recovering:
+            titleLabel.text = "正在重新加载网页"
+            messageLabel.text = "请稍候，页面内容正在恢复。"
+            retryButton.isHidden = true
+            activityIndicator.startAnimating()
+        }
+    }
+
+    private func configureView() {
+        translatesAutoresizingMaskIntoConstraints = false
+        backgroundColor = .systemBackground
+
+        retryButton.setTitle("重新加载", for: .normal)
+        retryButton.titleLabel?.font = .preferredFont(forTextStyle: .headline)
+        retryButton.setTitleColor(.white, for: .normal)
+        retryButton.backgroundColor = .systemBlue
+        retryButton.layer.cornerRadius = 10
+        retryButton.contentEdgeInsets = UIEdgeInsets(top: 10, left: 18, bottom: 10, right: 18)
+
+        addSubview(stackView)
+        stackView.addArrangedSubview(titleLabel)
+        stackView.addArrangedSubview(messageLabel)
+        stackView.addArrangedSubview(urlLabel)
+        stackView.addArrangedSubview(activityIndicator)
+        stackView.addArrangedSubview(retryButton)
+
+        NSLayoutConstraint.activate([
+            stackView.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 28),
+            stackView.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -28),
+            stackView.centerXAnchor.constraint(equalTo: centerXAnchor),
+            stackView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            stackView.widthAnchor.constraint(lessThanOrEqualToConstant: 420)
+        ])
     }
 }
 
@@ -344,6 +488,12 @@ final class BrowserUI {
     let geckoView: GeckoView = {
         let view = GeckoView()
         view.translatesAutoresizingMaskIntoConstraints = false
+        return view
+    }()
+
+    let contentCrashView: ContentCrashView = {
+        let view = ContentCrashView()
+        view.isHidden = true
         return view
     }()
     
@@ -430,6 +580,7 @@ final class BrowserUI {
         
         addressBar.configure(delegate: controller)
         keyboardDismissButton.button.addTarget(controller, action: #selector(BrowserViewController.dismissKeyboardTapped), for: .touchUpInside)
+        contentCrashView.retryButton.addTarget(controller, action: #selector(BrowserViewController.recoverCrashedContentRequested), for: .touchUpInside)
         bottomToolbar.delegate = controller
     }
     
@@ -444,6 +595,7 @@ final class BrowserUI {
         
         view.addSubview(ui.bottomContainer.bottomSafeAreaFillView)
         view.addSubview(ui.geckoView)
+        view.addSubview(ui.contentCrashView)
         view.addSubview(ui.bottomContainer.containerView)
         view.addSubview(ui.topBar.safeAreaFillView)
         ui.bottomContainer.containerView.addSubview(ui.addressBar)
@@ -538,6 +690,10 @@ final class BrowserUI {
             ui.geckoTrailingPhoneConstraint,
             ui.geckoTopPhoneConstraint,
             ui.geckoBottomPhoneConstraint,
+            ui.contentCrashView.leadingAnchor.constraint(equalTo: ui.geckoView.leadingAnchor),
+            ui.contentCrashView.trailingAnchor.constraint(equalTo: ui.geckoView.trailingAnchor),
+            ui.contentCrashView.topAnchor.constraint(equalTo: ui.geckoView.topAnchor),
+            ui.contentCrashView.bottomAnchor.constraint(equalTo: ui.geckoView.bottomAnchor),
             
             ui.bottomContainer.containerView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             ui.bottomContainer.containerView.trailingAnchor.constraint(equalTo: view.trailingAnchor),

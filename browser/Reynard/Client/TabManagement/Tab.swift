@@ -8,6 +8,40 @@
 import GeckoView
 import UIKit
 
+enum ContentTerminationReason {
+    case crash
+    case kill
+}
+
+enum ContentTerminationState {
+    case normal
+    case crashed(url: String?, reason: ContentTerminationReason)
+    case recovering(url: String?, reason: ContentTerminationReason)
+
+    var crashedURL: String? {
+        switch self {
+        case let .crashed(url, _), let .recovering(url, _):
+            return url
+        case .normal:
+            return nil
+        }
+    }
+
+    var isCrashed: Bool {
+        if case .crashed = self {
+            return true
+        }
+        return false
+    }
+
+    var isRecovering: Bool {
+        if case .recovering = self {
+            return true
+        }
+        return false
+    }
+}
+
 final class Tab {
     let id: UUID
     var session: GeckoSession
@@ -17,6 +51,33 @@ final class Tab {
     var favicon: UIImage?
     var pendingRestoreURL: String?
     var pendingDisplayText: String?
+    var navigationTransaction: NavigationTransaction?
+    var contentTerminationState: ContentTerminationState = .normal
+    var isContentCrashed: Bool {
+        get { contentTerminationState.isCrashed }
+        set {
+            if !newValue {
+                contentTerminationState = .normal
+            } else if !contentTerminationState.isCrashed {
+                contentTerminationState = .crashed(url: url, reason: .crash)
+            }
+        }
+    }
+    var crashedURL: String? {
+        get { contentTerminationState.crashedURL }
+        set {
+            switch contentTerminationState {
+            case let .crashed(_, reason):
+                contentTerminationState = .crashed(url: newValue, reason: reason)
+            case let .recovering(_, reason):
+                contentTerminationState = .recovering(url: newValue, reason: reason)
+            case .normal:
+                if let newValue {
+                    contentTerminationState = .crashed(url: newValue, reason: .crash)
+                }
+            }
+        }
+    }
     var selectionOrder = 0
     var suppressInitialNavigation = true
     var sessionCanGoBack = false

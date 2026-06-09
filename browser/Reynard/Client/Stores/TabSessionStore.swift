@@ -7,6 +7,8 @@
 
 import Foundation
 
+// URL 级恢复快照；当前 Swift GeckoView wrapper 未暴露 SessionState 序列化，
+// 因此这里不伪造 Gecko session history、same-URL entry 或 SPA history.state。
 final class TabSessionStore {
     static let shared = TabSessionStore()
     private static let maxHistoryEntries = 200
@@ -109,6 +111,58 @@ final class TabSessionStore {
         stateQueue.sync {
             var state = stateLocked(for: tabID)
             state.ownsNav = ownsNav
+            saveStateLocked(state, for: tabID)
+            return snapshot(from: state)
+        }
+    }
+
+    func peekPreviousURL(for tabID: UUID) -> String? {
+        stateQueue.sync {
+            stateLocked(for: tabID).backList.last
+        }
+    }
+
+    func peekNextURL(for tabID: UUID) -> String? {
+        stateQueue.sync {
+            stateLocked(for: tabID).forwardList.first
+        }
+    }
+
+    func commitPreviousURL(expectedURL: String, resolvedURL: String, for tabID: UUID) -> Snapshot {
+        stateQueue.sync {
+            var state = stateLocked(for: tabID)
+            guard state.backList.last == expectedURL else {
+                return snapshot(from: state)
+            }
+
+            _ = state.backList.popLast()
+            if let currentURL = state.currentURL,
+               !currentURL.isEmpty,
+               currentURL != resolvedURL {
+                state.forwardList.insert(currentURL, at: 0)
+            }
+
+            state.currentURL = resolvedURL
+            saveStateLocked(state, for: tabID)
+            return snapshot(from: state)
+        }
+    }
+
+    func commitNextURL(expectedURL: String, resolvedURL: String, for tabID: UUID) -> Snapshot {
+        stateQueue.sync {
+            var state = stateLocked(for: tabID)
+            guard state.forwardList.first == expectedURL else {
+                return snapshot(from: state)
+            }
+
+            _ = state.forwardList.removeFirst()
+            if let currentURL = state.currentURL,
+               !currentURL.isEmpty,
+               currentURL != resolvedURL {
+                state.backList.append(currentURL)
+            }
+
+            state.currentURL = resolvedURL
             saveStateLocked(state, for: tabID)
             return snapshot(from: state)
         }

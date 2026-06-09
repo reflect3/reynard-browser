@@ -101,6 +101,7 @@ extension BrowserViewController: TabManagerDelegate {
             browserUI.geckoView.session = nil
         }
         refreshAddressBar()
+        syncContentCrashUI()
         
         if !tabOverviewPresentation.isVisible {
             let overviewMode: TabOverviewCollection.Mode = tabManager.selectedTabMode == .private ? .privateTabs : .regularTabs
@@ -138,6 +139,7 @@ extension BrowserViewController: TabManagerDelegate {
         
         syncAddressBarLoadingState(progress: selectedTab.progress, isLoading: selectedTab.isLoading)
         refreshAddressBar()
+        syncContentCrashUI()
         
         updateNavigationButtons()
         if !tabOverviewPresentation.isVisible {
@@ -212,6 +214,7 @@ extension BrowserViewController: TabManagerDelegate {
         case .location:
             if index == tabManager.selectedTabIndex {
                 refreshAddressBar()
+                syncContentCrashUI()
                 updateNavigationButtons()
             }
             
@@ -232,6 +235,14 @@ extension BrowserViewController: TabManagerDelegate {
             if index == tabManager.selectedTabIndex {
                 let tab = activeTabs[index]
                 syncAddressBarLoadingState(progress: tab.progress, isLoading: tab.isLoading)
+                syncContentCrashUI()
+            }
+
+        case .contentState:
+            if index == tabManager.selectedTabIndex {
+                refreshAddressBar()
+                syncContentCrashUI()
+                updateNavigationButtons()
             }
             
         case .thumbnail:
